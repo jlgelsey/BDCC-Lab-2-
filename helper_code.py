@@ -1300,6 +1300,55 @@ def summarize_status(status):
             "crosstab": crosstab, "flags": flags}
 
 
+def status_by_regime(status):
+    """Works per status group under all three regimes, side by side.
+
+    The life + 70 rule (EU, UK and most other countries) is computed for
+    every work in estimate_copyright_status but used only for comparison;
+    this table is where it is reported, next to the two regimes the
+    analysis relies on.
+
+    Returns
+    -------
+    DataFrame
+        Rows: public domain, enters 2027, renewal unknown (US only),
+        protected, unknown. Columns: one per regime (works).
+    """
+    from pyspark.sql import functions as F
+
+    def group(code_col, regime):
+        if regime == "us":
+            return (
+                F.when(F.col(code_col) == "pd", "Public domain already")
+                .when(F.col(code_col) == "enters", "Enters 1 Jan 2027")
+                .when(F.col(code_col) == "renewal",
+                      "Renewal unknown (US only)")
+                .when(F.col(code_col).startswith("protected"), "Protected")
+                .otherwise("Unknown (missing data)")
+            )
+        return (
+            F.when(F.col(code_col) == "pd", "Public domain already")
+            .when(F.col(code_col) == "enters", "Enters 1 Jan 2027")
+            .when(F.col(code_col) == "protected", "Protected")
+            .otherwise("Unknown (missing data)")
+        )
+
+    row = status.select(
+        group("us_code", "us").alias("United States (publication + 95)"),
+        group("ph_code", "life").alias("Philippines (life + 50)"),
+        group("life70_code", "life").alias("Life + 70 (comparison)"),
+    )
+    order = ["Public domain already", "Enters 1 Jan 2027",
+             "Renewal unknown (US only)", "Protected",
+             "Unknown (missing data)"]
+    tables = []
+    for column in row.columns:
+        counts = row.groupBy(column).count().toPandas()
+        tables.append(counts.set_index(column)["count"].rename(column))
+    return (pd.concat(tables, axis=1).reindex(order).fillna(0)
+            .astype(int).rename_axis("Status on 1 Jan 2027"))
+
+
 def first_year_histogram(status, start=1800, end=MAX_VALID_YEAR):
     """Number of works per estimated first-publication year (pandas)."""
     from pyspark.sql import functions as F
@@ -1693,6 +1742,64 @@ def build_pd_list(profile, min_want_to_read=1, top_n=None, authors=None,
     return _finish_list(selected, order, top_n, authors)
 
 
+def selection_funnel(profile, min_want_to_read, max_recent_editions=1):
+    """Works remaining after each filtering step of the two lists.
+
+    Every step is applied on top of the previous one, so the table shows
+    exactly where works are lost: the share of the previous step and the
+    share of the whole catalogue are both reported.
+
+    Returns
+    -------
+    DataFrame
+        list, step, works, pct_of_previous, pct_of_catalogue.
+    """
+    from pyspark.sql import functions as F
+
+    unflagged = ~F.col("flagged")
+    demand = F.col("want_to_read") >= min_want_to_read
+    supply = F.col("n_recent_editions") <= max_recent_editions
+    entering = (F.col("us_code") == "enters") | (F.col("ph_code") == "enters")
+    free = (F.col("us_code") == "pd") | (F.col("ph_code") == "pd")
+    steps = {
+        "2027 watchlist": [
+            ("all works in the catalogue", F.lit(True)),
+            ("no data-quality flag", unflagged),
+            ("enters the public domain on 1 Jan 2027", entering),
+            (f"high demand (>= {min_want_to_read} Want-to-Read)", demand),
+            (f"low supply (<= {max_recent_editions} recent edition)",
+             supply),
+        ],
+        "public-domain list": [
+            ("all works in the catalogue", F.lit(True)),
+            ("no data-quality flag", unflagged),
+            ("public domain already (US or PH rule)", free),
+            (f"high demand (>= {min_want_to_read} Want-to-Read)", demand),
+        ],
+    }
+    aggs, labels = [], []
+    for name, conditions in steps.items():
+        cumulative = F.lit(True)
+        for i, (label, condition) in enumerate(conditions):
+            cumulative = cumulative & condition
+            aggs.append(F.sum(cumulative.cast("int")).alias(f"c{len(aggs)}"))
+            labels.append((name, label))
+    counts = profile.agg(*aggs).collect()[0]
+    rows, previous = [], None
+    for i, (name, label) in enumerate(labels):
+        works = int(counts[f"c{i}"])
+        if label == "all works in the catalogue":
+            total, previous = works, works
+        rows.append({
+            "list": name, "step": label, "works": works,
+            "pct_of_previous": round(100 * works / previous, 2)
+            if previous else np.nan,
+            "pct_of_catalogue": round(100 * works / total, 4),
+        })
+        previous = works
+    return pd.DataFrame(rows)
+
+
 def watchlist_sensitivity(profile, quantiles=(0.90, 0.95, 0.99),
                           max_recent_options=(0, 1, 2, 5)):
     """How many works the watchlist keeps under other reasonable cutoffs.
@@ -1941,24 +2048,251 @@ def validate_analysis(tables, status, profile, watchlist,
     return pd.DataFrame(checks)
 
 
+# Hand-checked facts for the 15 top-ranked rows of the 2027 watchlist (W)
+# and of the potentially-public-domain list (P), as they appear in the
+# report. Each value was checked by hand against publisher, library and
+# encyclopaedia records; None means "not checked" (the listing does not
+# depend on it, or no reliable source was found). These rows were chosen
+# because they are the ones a reader would act on first, so they are a
+# check of the lists' top, not a random sample of the catalogue.
+AUDIT_SAMPLE = [
+    # list, work_key, checked first year, checked last-author death, note
+    ("W", "/works/OL267968W", 1931, None,
+     "1931 text only; later revisions by co-authors remain protected"),
+    ("W", "/works/OL2286161W", 1963, 1976, "Yale UP 1963; Albers d. 1976"),
+    ("W", "/works/OL2269514W", 1939, 1976, "Trumbo d. 1976"),
+    ("W", "/works/OL210644W", 1931, None,
+     "London (Nisbet) 1931; demand may be confused with a 2018 title"),
+    ("W", "/works/OL6563302W", 1931, 1962,
+     "McGraw-Hill 1st ed. 1931; author death missing in the data"),
+    ("W", "/works/OL7118113W", 1974, 1976, "Crowell 1974; Johnson d. 1976"),
+    ("W", "/works/OL39394W", 1931, 2002,
+     "Ghostwritten by M. Wirt Benson (d. 2002), not the linked author"),
+    ("W", "/works/OL82931W", 1932, 1962,
+     "Published October 1932, not 1931"),
+    ("W", "/works/OL1127268W", 1931, 1937, "Adler d. 1937"),
+    ("W", "/works/OL4785050W", 1940, 1976, "Sperry d. 1976"),
+    ("W", "/works/OL2139804W", 1916, 1913,
+     "First published 1916 (posthumous), so already free in the US"),
+    ("W", "/works/OL326412W", 1958, 1976, "Heisenberg d. 1976"),
+    ("W", "/works/OL707919W", 1931, 1936, "M. R. James d. 1936"),
+    ("W", "/works/OL4775270W", 1939, 1976,
+     "Columbia UP 1939; Boyer d. 1976"),
+    ("W", "/works/OL7002113W", 1931, None, "Cape 1931"),
+    ("P", "/works/OL527464W", 1937, 1970, "Hill d. 1970"),
+    ("P", "/works/OL1063267W", 1936, 1955, "Carnegie d. 1955"),
+    ("P", "/works/OL66554W", 1813, 1817, "Austen d. 1817"),
+    ("P", "/works/OL244537W", -500, None,
+     "Ancient text (c. 5th century BC); catalogue year 1900 is a "
+     "placeholder"),
+    ("P", "/works/OL3923952W", 1948, 1948, "Dazai d. 1948"),
+    ("P", "/works/OL27482W", 1937, 1973, "Tolkien d. 1973"),
+    ("P", "/works/OL10263W", 1943, 1944, "Saint-Exupery d. 1944"),
+    ("P", "/works/OL1168007W", 1945, 1950, "Orwell d. 1950"),
+    ("P", "/works/OL498556W", 1915, 1924, "Kafka d. 1924"),
+    ("P", "/works/OL8165007W", 1926, 1957, "Clason d. 1957"),
+    ("P", "/works/OL21177W", 1847, 1848,
+     "Published 1847 (catalogue says 1846)"),
+    ("P", "/works/OL166894W", 1866, 1881, "Dostoevsky d. 1881"),
+    ("P", "/works/OL1230613W", 1942, 1960, "Camus d. 1960"),
+    ("P", "/works/OL262421W", 1892, 1930, "Conan Doyle d. 1930"),
+    ("P", "/works/OL64365W", 1932, 1963, "Huxley d. 1963"),
+]
+
+
+def compare_codes(estimated, checked):
+    """Classify one estimated status code against the hand-checked one.
+
+    Returns "not checked" when no checked value exists, "missing in data"
+    when the estimate is an unknown_* code (the pipeline declined to
+    guess), "correct" when the codes match and "wrong" otherwise.
+    """
+    if checked is None:
+        return "not checked"
+    if str(estimated).startswith("unknown"):
+        return "missing in data"
+    return "correct" if estimated == checked else "wrong"
+
+
+def audit_estimates(profile, sample=AUDIT_SAMPLE):
+    """Compare the pipeline's estimates with hand-checked facts.
+
+    For every audited work the US and Philippine status codes are
+    recomputed from the checked first year and death year with the same
+    rule functions (us_status, life_plus_status), so a difference can
+    only come from the catalogue data, not from the rules. The checked
+    death year is treated as that of the last surviving author.
+
+    Returns
+    -------
+    DataFrame
+        One row per audited work with estimated and checked values, the
+        outcome per regime and an overall verdict ("wrong" if either
+        regime is wrong, otherwise "correct" if at least one regime could
+        be checked and matched).
+    """
+    from pyspark.sql import functions as F
+
+    keys = [key for _, key, _, _, _ in sample]
+    estimates = {
+        r["work_key"]: r.asDict() for r in profile.filter(
+            F.col("work_key").isin(keys)).select(
+            "work_key", "title", "first_year", "last_death_year",
+            "us_code", "ph_code").collect()
+    }
+    rows = []
+    for listed, key, year, death, note in sample:
+        est = estimates.get(key)
+        if est is None:
+            continue
+        checked_us = us_status(year) if year is not None else None
+        checked_ph = (life_plus_status(death, 1, 1, 50)
+                      if death is not None else None)
+        us_outcome = compare_codes(est["us_code"], checked_us)
+        ph_outcome = compare_codes(est["ph_code"], checked_ph)
+        outcomes = {us_outcome, ph_outcome}
+        if "wrong" in outcomes:
+            verdict = "wrong"
+        elif "correct" in outcomes:
+            verdict = "correct"
+        else:
+            verdict = "not verifiable"
+        rows.append({
+            "list": {"W": "2027 watchlist", "P": "public domain"}[listed],
+            "title": est["title"],
+            "est_year": est["first_year"], "checked_year": year,
+            "est_death": est["last_death_year"], "checked_death": death,
+            "est_us": est["us_code"], "checked_us": checked_us,
+            "us_outcome": us_outcome,
+            "est_ph": est["ph_code"], "checked_ph": checked_ph,
+            "ph_outcome": ph_outcome,
+            "verdict": verdict, "note": note,
+        })
+    table = pd.DataFrame(rows)
+    for column in ["est_year", "checked_year", "est_death",
+                   "checked_death"]:
+        table[column] = table[column].astype("Int64")
+    return table
+
+
+def audit_summary(audit):
+    """Count audit outcomes per regime and list (pandas)."""
+    parts = []
+    for regime in ["us", "ph"]:
+        counts = (audit.groupby(["list", f"{regime}_outcome"]).size()
+                  .unstack(fill_value=0))
+        counts.insert(0, "regime", {"us": "United States",
+                                    "ph": "Philippines"}[regime])
+        parts.append(counts)
+    table = pd.concat(parts).fillna(0)
+    columns = ["regime"] + [c for c in ["correct", "wrong",
+                                        "missing in data", "not checked"]
+                            if c in table.columns]
+    for column in columns[1:]:
+        table[column] = table[column].astype(int)
+    return table[columns].reset_index()
+
+
 # ---------------------------------------------------------------------------
 # PART 10: CHARTS
 # ---------------------------------------------------------------------------
 
-# One accessible categorical palette, reused by every chart so a rights
-# group keeps the same colour throughout the report.
+# The report's colour system. Four hues, each with one fixed meaning that
+# holds in every chart, in the pipeline diagram and in the notebook's own
+# headings and tables:
+#   INK    data, the pipeline's processing stages, US public domain
+#   AMBER  the 2027 opportunity (works entering, the watchlist)
+#   GREEN  reader demand
+#   PLUM   uncertainty (the 1932-1963 renewal-unknown group, rights rules)
+# Supply indicators use three shades of INK (INK_DARK, INK, INK_LIGHT).
+# The four were checked with a colour-vision-deficiency validator on a
+# light surface: every adjacent pair stays distinguishable for protan,
+# deutan and tritan readers, and each passes 3:1 contrast. Grey marks
+# "everything else" and the validation stage.
+INK = "#1A69B0"
+INK_DARK = "#0E3B66"
+INK_LIGHT = "#86AED8"
+AMBER = "#D9731C"
+GREEN = "#178C68"
+PLUM = "#8A4FB0"
+GREY = "#8C939B"
+TEXT = "#1E2A38"
+MUTED = "#5B6675"
+PAPER = "#FCFBF8"
+RULE = "#E4E0D6"
+
 PALETTE = {
-    "US PD (<=1930)": "#2a78b5",
-    "Enters 2027": "#d9622b",
-    "Renewal unknown (1932-63)": "#8a6fbf",
-    "Other or unknown": "#9aa3ad",
+    "US PD (<=1930)": INK,
+    "Enters 2027": AMBER,
+    "Renewal unknown (1932-63)": PLUM,
+    "Other or unknown": GREY,
 }
+
+
+def use_report_style():
+    """Apply the report's matplotlib style (fonts, colours, light grid).
+
+    Call once at the top of the notebook; every chart function in this
+    module then inherits the same warm paper background, dark-slate text
+    and recessive axes, so figures look like one family.
+    """
+    from cycler import cycler
+
+    plt.rcParams.update({
+        "figure.facecolor": PAPER,
+        "axes.facecolor": PAPER,
+        "savefig.facecolor": PAPER,
+        "axes.edgecolor": RULE,
+        "axes.labelcolor": TEXT,
+        "axes.titlecolor": TEXT,
+        "axes.titlesize": 12,
+        "axes.titleweight": "bold",
+        "axes.titlelocation": "left",
+        "axes.labelsize": 10,
+        "axes.prop_cycle": cycler(color=[INK, AMBER, GREEN, PLUM, GREY]),
+        "xtick.color": MUTED,
+        "ytick.color": MUTED,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "grid.color": RULE,
+        "grid.linewidth": 0.8,
+        "text.color": TEXT,
+        "font.family": "DejaVu Sans",
+        "legend.frameon": False,
+        "figure.titlesize": 13,
+        "figure.titleweight": "bold",
+    })
+
+
+def notebook_css():
+    """CSS that gives the notebook's headings, captions and tables the
+    same colour system as the charts. Display it with
+    IPython.display.HTML; it applies in Jupyter and in the HTML export.
+    """
+    return f"""<style>
+.jp-RenderedHTMLCommon h1, .rendered_html h1 {{
+  color: {TEXT}; border-bottom: 3px solid {AMBER}; padding-bottom: 6px; }}
+.jp-RenderedHTMLCommon h2, .rendered_html h2 {{
+  color: {INK}; border-bottom: 1px solid {RULE}; padding-bottom: 4px;
+  margin-top: 1.6em; }}
+.jp-RenderedHTMLCommon h3, .rendered_html h3 {{ color: {TEXT}; }}
+.jp-RenderedHTMLCommon strong, .rendered_html strong {{ color: {TEXT}; }}
+.report-caption {{ color: {TEXT}; font-weight: 600; margin: 10px 0 4px 0;
+  max-width: 1100px; }}
+.report-caption span {{ color: {INK}; }}
+.report-table table {{ border-collapse: collapse; font-size: 12px; }}
+.report-table thead th {{ background: {INK}; color: #fff; padding: 5px 9px;
+  text-align: left; font-weight: 600; }}
+.report-table tbody td {{ padding: 4px 9px;
+  border-bottom: 1px solid {RULE}; }}
+.report-table tbody tr:nth-child(even) {{ background: #F5F2EA; }}
+</style>"""
 
 
 def _style(ax):
     """Shared light styling: no top/right spines, faint horizontal grid."""
     ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="y")
     ax.set_axisbelow(True)
 
 
@@ -1976,7 +2310,7 @@ def plot_first_year_histogram(hist):
     ax.set_yscale("log")
     for year, text in [(1930.5, "1931 enters 2027"), (1963.5, "1963"),
                        (1977.5, "1977")]:
-        ax.axvline(year, color="#444", lw=0.8, ls="--")
+        ax.axvline(year, color=MUTED, lw=0.8, ls="--")
         ax.text(year + 1, ax.get_ylim()[1] * 0.5, text, fontsize=8)
     ax.set_title("Works by estimated first-publication year (log scale)")
     ax.set_xlabel("First-publication year")
@@ -1994,7 +2328,7 @@ def plot_status_bars(us_table, ph_table):
         (axes[1], ph_table, "PH status", "Philippines (life + 50 years)"),
     ]:
         data = table.sort_values("works")
-        ax.barh(data[column], data["works"] / 1e6, color="#2a78b5")
+        ax.barh(data[column], data["works"] / 1e6, color=INK)
         pairs = zip(data["works"], data["share_pct"])
         for y, (works, pct) in enumerate(pairs):
             ax.text(works / 1e6, y, f"  {pct:.1f}%", va="center",
@@ -2042,7 +2376,9 @@ def plot_supply_comparison(groups):
         "pct_filipino": "Has a Filipino-language edition",
     })
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    data.plot.barh(ax=ax, color=["#2a78b5", "#d9622b", "#3a9b6b"],
+    # supply is one family (shades of INK), matching the Supply stage
+    # of the pipeline diagram; green stays reserved for demand
+    data.plot.barh(ax=ax, color=[INK_DARK, INK, INK_LIGHT],
                    width=0.75)
     ax.invert_yaxis()
     ax.set_xlabel("Share of works in the group (%)")
@@ -2075,5 +2411,101 @@ def plot_watchlist(watchlist, top_n=20):
                  "editions")
     ax.spines[["top", "right"]].set_visible(False)
     ax.set_xlim(0, data["want_to_read"].max() * 1.45)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pipeline_diagram():
+    """Draw the analysis pipeline as a left-to-right flow diagram.
+
+    Each card is one stage: a coloured title band (colours follow the
+    report's colour system), the main operations, and the helper function
+    that implements it, so the figure doubles as a map from the
+    methodology to the code. Lanes underneath group the stages into the
+    three phases described in Section 4.1. Returns a matplotlib Figure.
+    """
+    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+    fig, ax = plt.subplots(figsize=(13.5, 6.4))
+    fig.patch.set_facecolor(PAPER)
+    ax.set_facecolor(PAPER)
+    ax.set_xlim(0, 13.5)
+    ax.set_ylim(-0.75, 6.4)
+    ax.axis("off")
+
+    def card(x, y, w, h, number, title, lines, func, color):
+        # card body with a thin border in the stage colour
+        ax.add_patch(FancyBboxPatch(
+            (x, y), w, h, boxstyle="round,pad=0,rounding_size=0.10",
+            linewidth=1.3, edgecolor=color, facecolor="white", zorder=2))
+        # coloured title band across the top of the card
+        band = 0.46
+        ax.add_patch(FancyBboxPatch(
+            (x, y + h - band), w, band,
+            boxstyle="round,pad=0,rounding_size=0.10",
+            linewidth=0, facecolor=color, zorder=3))
+        ax.add_patch(FancyBboxPatch(
+            (x, y + h - band), w, band / 2, boxstyle="square,pad=0",
+            linewidth=0, facecolor=color, zorder=3))
+        ax.text(x + 0.16, y + h - band / 2, f"{number}  {title}",
+                ha="left", va="center", fontsize=10.5, fontweight="bold",
+                color="white", zorder=4)
+        ax.text(x + 0.16, y + h - band - 0.16, "\n".join(lines),
+                ha="left", va="top", fontsize=8.6, color=TEXT,
+                linespacing=1.45, zorder=4)
+        ax.text(x + 0.16, y + 0.14, func, ha="left", va="bottom",
+                fontsize=8, color=color, family="monospace",
+                fontweight="bold", zorder=4)
+
+    def arrow(x1, y1, x2, y2, color=MUTED):
+        ax.add_patch(FancyArrowPatch(
+            (x1, y1), (x2, y2), arrowstyle="-|>", mutation_scale=13,
+            linewidth=1.3, color=color, zorder=1,
+            connectionstyle="arc3,rad=0"))
+
+    def lane(x1, x2, label, color):
+        ax.plot([x1, x2], [-0.3, -0.3], color=color, lw=3,
+                solid_capstyle="round")
+        ax.text((x1 + x2) / 2, -0.62, label, ha="center", va="center",
+                fontsize=9, color=color, fontweight="bold")
+
+    card(0.1, 1.9, 2.15, 2.6, 1, "Raw dumps",
+         ["6 monthly .txt.gz files", "Oct 2026, 18.5 GB",
+          "works, editions, authors,", "wikidata, reading log,",
+          "ratings"], "discover_dumps", GREY)
+    card(2.6, 1.9, 2.15, 2.6, 2, "Parse",
+         ["PySpark, explicit schemas", "free-text dates -> years",
+          "publisher names cleaned", "6 concurrent jobs"],
+         "build_parquet_tables", INK)
+    card(5.1, 1.9, 2.0, 2.6, 3, "Parquet",
+         ["6 clean tables, 3.2 GB", "field coverage profile",
+          "duplicate-key check"], "profile_tables", INK)
+    card(7.55, 4.35, 2.55, 1.95, "4a", "Rights status",
+         ["death years: OL + Wikidata", "US, PH and life+70 rules",
+          "data-quality flags"], "estimate_copyright_status", PLUM)
+    card(7.55, 2.2, 2.55, 1.95, "4b", "Demand",
+         ["Want-to-Read, shelves", "ratings, 12-month trends"],
+         "compute_demand", GREEN)
+    card(7.55, 0.05, 2.55, 1.95, "4c", "Supply",
+         ["recent editions, publishers", "scans, Filipino editions"],
+         "compute_supply", INK)
+    card(10.55, 2.2, 2.85, 2.3, 5, "Profile & lists",
+         ["one row per work (41.7M)", "2027 watchlist (53 works)",
+          "public-domain list", "sensitivity checks"],
+         "build_watchlist", AMBER)
+    card(10.55, 0.05, 2.85, 1.85, 6, "Validation",
+         ["10 independent recounts", "hand-checked audit, 30 rows"],
+         "audit_estimates", GREY)
+
+    arrow(2.25, 3.2, 2.6, 3.2)
+    arrow(4.75, 3.2, 5.1, 3.2)
+    for y, color in ((5.3, PLUM), (3.18, GREEN), (1.03, INK)):
+        arrow(7.1, 3.2, 7.55, y, color)
+        arrow(10.1, y, 10.55, 3.35, color)
+    arrow(11.98, 2.2, 11.98, 1.9, AMBER)
+
+    lane(0.1, 7.1, "INGEST ONCE  (Sections 4.2-4.3)", INK)
+    lane(7.55, 10.1, "ANALYSE EVERY WORK  (4.4-4.7)", PLUM)
+    lane(10.55, 13.4, "SELECT & VERIFY  (4.8-4.10)", AMBER)
     fig.tight_layout()
     return fig
