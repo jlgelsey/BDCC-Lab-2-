@@ -7998,12 +7998,37 @@ this report; the notebook rebuilds everything from the dumps.</p>
 <span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">IPython.display</span><span class="w"> </span><span class="kn">import</span> <span class="n">HTML</span><span class="p">,</span> <span class="n">display</span>
 
-<span class="c1"># All analysis code lives in helper_code.py next to this notebook. Reloading</span>
-<span class="c1"># it means edits to the file take effect without restarting the kernel.</span>
-<span class="n">sys</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">()))</span>
+<span class="c1"># All analysis code lives in helper_code.py, which must sit in the same</span>
+<span class="c1"># folder as this notebook. Jupyter usually starts in that folder, but some</span>
+<span class="c1"># editors (VS Code, JupyterHub) start elsewhere, so we also look one level</span>
+<span class="c1"># up and in the repository folder before giving up with a clear message.</span>
+<span class="n">candidates</span> <span class="o">=</span> <span class="p">[</span><span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">(),</span> <span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">()</span><span class="o">.</span><span class="n">parent</span><span class="p">,</span> <span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">()</span> <span class="o">/</span> <span class="s2">"bdcc-lab-2-"</span><span class="p">]</span>
+<span class="n">HELPER_DIR</span> <span class="o">=</span> <span class="nb">next</span><span class="p">((</span><span class="n">folder</span> <span class="k">for</span> <span class="n">folder</span> <span class="ow">in</span> <span class="n">candidates</span>
+                   <span class="k">if</span> <span class="p">(</span><span class="n">folder</span> <span class="o">/</span> <span class="s2">"helper_code.py"</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">()),</span> <span class="kc">None</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">HELPER_DIR</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+        <span class="s2">"helper_code.py not found. Put it in the same folder as this "</span>
+        <span class="sa">f</span><span class="s2">"notebook (Jupyter is currently running in </span><span class="si">{</span><span class="n">Path</span><span class="o">.</span><span class="n">cwd</span><span class="p">()</span><span class="si">}</span><span class="s2">), or "</span>
+        <span class="s2">"os.chdir() to that folder, then restart the kernel and Run All."</span>
+    <span class="p">)</span>
+<span class="n">sys</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">HELPER_DIR</span><span class="o">.</span><span class="n">resolve</span><span class="p">()))</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">helper_code</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">helper</span>
 
+<span class="c1"># Reloading means edits to helper_code.py take effect without a restart.</span>
 <span class="n">helper</span> <span class="o">=</span> <span class="n">importlib</span><span class="o">.</span><span class="n">reload</span><span class="p">(</span><span class="n">helper</span><span class="p">)</span>
+
+<span class="c1"># This notebook needs the updated helper (with the report style and the</span>
+<span class="c1"># pipeline diagram); an older copy of helper_code.py lacks them.</span>
+<span class="n">missing</span> <span class="o">=</span> <span class="p">[</span><span class="n">name</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"use_report_style"</span><span class="p">,</span> <span class="s2">"notebook_css"</span><span class="p">,</span>
+                             <span class="s2">"plot_pipeline_diagram"</span><span class="p">,</span> <span class="s2">"audit_estimates"</span><span class="p">,</span>
+                             <span class="s2">"selection_funnel"</span><span class="p">)</span>
+           <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">helper</span><span class="p">,</span> <span class="n">name</span><span class="p">)]</span>
+<span class="k">if</span> <span class="n">missing</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">ImportError</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">HELPER_DIR</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="s1">'helper_code.py'</span><span class="si">}</span><span class="s2"> is an older version without "</span>
+        <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">missing</span><span class="si">}</span><span class="s2">. Replace it with the latest helper_code.py from the "</span>
+        <span class="s2">"revise-prose-sections-1-2-4 branch."</span>
+    <span class="p">)</span>
 
 
 <span class="c1"># One colour system for charts, the diagram, headings and tables (see the</span>
