@@ -77,8 +77,20 @@ DUMP_NAMES = ("works", "editions", "authors", "wikidata", "reading-log",
 DATA_DIR_CANDIDATES = (
     "/mnt/data/public/openlibrary",
     "/mnt/data/public/open-library",
+    "/mnt/data/public/open_library",
     "data",
 )
+# Shared data root on Jojie, the course's JupyterHub server. If none of the
+# folders above holds the dumps, every folder up to two levels below this
+# root is searched as well.
+SHARED_DATA_ROOT = "/mnt/data/public"
+
+# The dump whose numbers the report's narrative quotes. Running on another
+# month's dump works, but the text would then need updating.
+REPORT_DUMP_DATE = "2026-10-31"
+
+DUMP_FILE_REGEX = (r"^ol_dump_{name}_(\d{{4}}-\d{{2}}-\d{{2}}|latest)"
+                   r"\.txt(\.gz)?$")
 
 SHELVES = ("Want to Read", "Currently Reading", "Already Read")
 
@@ -95,7 +107,7 @@ PUBLISHER_LEGAL_SUFFIXES = (
 # ---------------------------------------------------------------------------
 
 
-def create_spark(app_name="ol-pd-radar", driver_memory="10g",
+def create_spark(app_name="ol-pd-radar", driver_memory=None,
                  shuffle_partitions=64, local_dir=None):
     """Start (or reuse) a local Spark session sized for one machine.
 
@@ -103,12 +115,17 @@ def create_spark(app_name="ol-pd-radar", driver_memory="10g",
     ----------
     app_name : str
         Name shown in the Spark UI.
-    driver_memory : str
+    driver_memory : str, optional
         JVM heap for the driver; in local mode the driver does all work.
+        Defaults to the OL_SPARK_MEMORY environment variable, else "10g".
+        Lower it (for example "6g") on a server with a smaller memory
+        allowance per user, such as a shared JupyterHub.
     shuffle_partitions : int
         Number of partitions after joins and group-bys. 64 suits 4-16 cores.
     local_dir : str, optional
-        Scratch folder for shuffle files; defaults to Spark's own choice.
+        Scratch folder for shuffle files; defaults to the OL_SPARK_LOCAL_DIR
+        environment variable, else Spark's own choice (usually /tmp). Large
+        joins write several GB here, so point it at a roomy disk.
 
     Returns
     -------
@@ -116,6 +133,8 @@ def create_spark(app_name="ol-pd-radar", driver_memory="10g",
     """
     from pyspark.sql import SparkSession
 
+    driver_memory = driver_memory or os.environ.get("OL_SPARK_MEMORY", "10g")
+    local_dir = local_dir or os.environ.get("OL_SPARK_LOCAL_DIR")
     builder = (
         SparkSession.builder.appName(app_name)
         .master(os.environ.get("SPARK_MASTER", "local[*]"))
@@ -133,12 +152,23 @@ def create_spark(app_name="ol-pd-radar", driver_memory="10g",
     return spark
 
 
-def resolve_data_dir(custom_dir=None):
-    """Find the folder that holds the ol_dump_*.txt.gz files.
+def _has_dumps(path):
+    """True if a folder directly contains Open Library dump files."""
+    path = Path(path)
+    try:
+        return path.is_dir() and any(path.glob("ol_dump_*.txt*"))
+    except OSError:          # unreadable folder on a shared server
+        return False
+
+
+def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT):
+    """Find the folder that holds the ol_dump_* files.
 
     The search order is: an explicit argument, the OL_DATA_DIR environment
-    variable, then DATA_DIR_CANDIDATES. An explicit folder that does not
-    exist raises an error instead of silently falling back to another one.
+    variable, the folders in DATA_DIR_CANDIDATES, and finally every folder
+    up to two levels below `shared_root` (the class data root on Jojie).
+    An explicit folder that does not exist raises an error instead of
+    silently falling back to another one.
 
     Returns
     -------
@@ -152,12 +182,17 @@ def resolve_data_dir(custom_dir=None):
     env_dir = os.environ.get("OL_DATA_DIR")
     candidates = ([env_dir] if env_dir else []) + list(DATA_DIR_CANDIDATES)
     for candidate in candidates:
-        path = Path(candidate)
-        if path.is_dir() and any(path.glob("ol_dump_*.txt.gz")):
-            return path
+        if _has_dumps(candidate):
+            return Path(candidate)
+    root = Path(shared_root)
+    if root.is_dir():
+        for pattern in ("*", "*/*"):
+            for folder in sorted(root.glob(pattern)):
+                if _has_dumps(folder):
+                    return folder
     raise FileNotFoundError(
-        "No Open Library dumps found. Set OL_DATA_DIR or place the "
-        "ol_dump_*.txt.gz files in ./data"
+        "No Open Library dumps (ol_dump_*.txt.gz) found. Set OL_DATA_DIR "
+        "to the folder that holds them, or place them in ./data"
     )
 
 
@@ -175,7 +210,9 @@ def discover_dumps(data_dir, names=DUMP_NAMES, required=True):
     """Pick the newest dump file for each requested dump type.
 
     File names follow ol_dump_<name>_<YYYY-MM-DD>.txt.gz; the ISO date sorts
-    correctly as text, so the last match is the newest.
+    correctly as text, so the newest dated file is chosen. Files named
+    ol_dump_<name>_latest.txt(.gz) and uncompressed .txt copies are also
+    accepted, because shared servers sometimes store the dumps that way.
 
     Parameters
     ----------
@@ -194,12 +231,13 @@ def discover_dumps(data_dir, names=DUMP_NAMES, required=True):
     data_dir = Path(data_dir)
     found = {}
     for name in names:
-        pattern = re.compile(
-            rf"^ol_dump_{re.escape(name)}_(\d{{4}}-\d{{2}}-\d{{2}})\.txt\.gz$"
-        )
-        matches = sorted(
-            p for p in data_dir.iterdir() if pattern.match(p.name)
-        )
+        pattern = re.compile(DUMP_FILE_REGEX.format(name=re.escape(name)))
+        matches = [p for p in data_dir.iterdir() if pattern.match(p.name)]
+        # newest dated file wins; a "latest" file is used only if no dated
+        # file exists, and a .gz file beats an uncompressed copy
+        matches.sort(key=lambda p: (pattern.match(p.name).group(1) != "latest",
+                                    pattern.match(p.name).group(1),
+                                    p.name.endswith(".gz")))
         if matches:
             found[name] = matches[-1]
         elif required:
@@ -245,6 +283,28 @@ def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
             row["parquet_ready"] = (folder / "_SUCCESS").is_file()
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def check_dump_date(dumps, expected=REPORT_DUMP_DATE):
+    """Compare the dumps' dates with the date the report's text describes.
+
+    Returns a short message: confirmation when every dated dump matches
+    `expected`, otherwise a warning naming the dates found, since the
+    numbers quoted in the narrative come from the `expected` dump.
+    """
+    dates = sorted({
+        match.group(1) for path in dumps.values()
+        for match in [re.search(r"(\d{4}-\d{2}-\d{2}|latest)", path.name)]
+        if match
+    })
+    if dates == [expected]:
+        return f"All dumps are dated {expected}, as described in the text."
+    return (
+        f"WARNING: dumps dated {', '.join(dates) or 'unknown'} were found, "
+        f"but the report's text quotes the {expected} dump. The tables and "
+        "charts will reflect the new data; update the numbers in the "
+        "narrative before submitting."
+    )
 
 
 # ---------------------------------------------------------------------------

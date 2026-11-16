@@ -7836,6 +7836,7 @@ folder, which is deleted afterwards.</p>
 <span class="kn">import</span><span class="w"> </span><span class="nn">gzip</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">importlib</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">unittest</span>
@@ -8666,6 +8667,80 @@ so the module stays easy to read for the peer reviewers.</p>
 </div>
 </div>
 </div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=41991dd5">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
+<h2 id="4c-Finding-the-dumps-on-a-shared-server">4c Finding the dumps on a shared server<a class="anchor-link" href="#4c-Finding-the-dumps-on-a-shared-server">¶</a></h2><p>On Jojie the dumps live in a shared read-only folder whose exact name and file-naming style we cannot assume, so these tests check that discovery accepts dated, <code>latest</code> and uncompressed files, searches below the shared data root, and warns when the dump date differs from the one the report's text describes.</p>
+</div>
+</div>
+</div>
+</div><div class="jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-noOutputs" id="cell-id=71508522">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea">
+<div class="jp-InputPrompt jp-InputArea-prompt">In [8]:</div>
+<div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor" data-type="inline">
+<div class="cm-editor cm-s-jupyter">
+<div class="highlight hl-ipython3"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">TestDumpDiscovery</span><span class="p">(</span><span class="n">unittest</span><span class="o">.</span><span class="n">TestCase</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">make_files</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">folder</span><span class="p">,</span> <span class="n">names</span><span class="p">):</span>
+        <span class="n">folder</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
+            <span class="p">(</span><span class="n">folder</span> <span class="o">/</span> <span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="s2">""</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_dated_beats_latest_and_gz_beats_txt</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryDirectory</span><span class="p">()</span> <span class="k">as</span> <span class="n">directory</span><span class="p">:</span>
+            <span class="n">folder</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">folder</span><span class="p">,</span> <span class="p">[</span>
+                <span class="s2">"ol_dump_works_2026-09-30.txt.gz"</span><span class="p">,</span>
+                <span class="s2">"ol_dump_works_2026-10-31.txt"</span><span class="p">,</span>
+                <span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">,</span>
+                <span class="s2">"ol_dump_works_latest.txt.gz"</span><span class="p">,</span>
+                <span class="s2">"ol_dump_ratings_latest.txt.gz"</span><span class="p">,</span>
+                <span class="s2">"ol_dump_editions_2026-10-31.txt"</span><span class="p">,</span>
+            <span class="p">])</span>
+            <span class="n">found</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">discover_dumps</span><span class="p">(</span>
+                <span class="n">folder</span><span class="p">,</span> <span class="n">names</span><span class="o">=</span><span class="p">(</span><span class="s2">"works"</span><span class="p">,</span> <span class="s2">"ratings"</span><span class="p">,</span> <span class="s2">"editions"</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">found</span><span class="p">[</span><span class="s2">"works"</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                             <span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">found</span><span class="p">[</span><span class="s2">"ratings"</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                             <span class="s2">"ol_dump_ratings_latest.txt.gz"</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">found</span><span class="p">[</span><span class="s2">"editions"</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+                             <span class="s2">"ol_dump_editions_2026-10-31.txt"</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_search_below_shared_root</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryDirectory</span><span class="p">()</span> <span class="k">as</span> <span class="n">directory</span><span class="p">:</span>
+            <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
+            <span class="n">target</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">"some-course"</span> <span class="o">/</span> <span class="s2">"openlibrary-2026"</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="p">[</span><span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">root</span> <span class="o">/</span> <span class="s2">"other-dataset"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"notes.csv"</span><span class="p">])</span>
+            <span class="n">saved</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"OL_DATA_DIR"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">found</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">resolve_data_dir</span><span class="p">(</span><span class="n">shared_root</span><span class="o">=</span><span class="n">root</span><span class="p">)</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">saved</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"OL_DATA_DIR"</span><span class="p">]</span> <span class="o">=</span> <span class="n">saved</span>
+            <span class="c1"># ./data may hold dumps when the tests run next to the report</span>
+            <span class="k">if</span> <span class="n">found</span> <span class="o">!=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">"data"</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">found</span><span class="p">,</span> <span class="n">target</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_dump_date_check</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">same</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"works"</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">)}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">check_dump_date</span><span class="p">(</span><span class="n">same</span><span class="p">)</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"All"</span><span class="p">))</span>
+        <span class="n">other</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"works"</span><span class="p">:</span> <span class="n">Path</span><span class="p">(</span><span class="s2">"ol_dump_works_2026-11-30.txt.gz"</span><span class="p">)}</span>
+        <span class="n">message</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">check_dump_date</span><span class="p">(</span><span class="n">other</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">message</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"WARNING"</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertIn</span><span class="p">(</span><span class="s2">"2026-11-30"</span><span class="p">,</span> <span class="n">message</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+</div>
+</div>
 <div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=a47c6a78">
 <div class="jp-Cell-inputWrapper" tabindex="0">
 <div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
@@ -8681,14 +8756,14 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
 </div>
 <div class="jp-InputArea jp-Cell-inputArea">
-<div class="jp-InputPrompt jp-InputArea-prompt">In [8]:</div>
+<div class="jp-InputPrompt jp-InputArea-prompt">In [9]:</div>
 <div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor" data-type="inline">
 <div class="cm-editor cm-s-jupyter">
 <div class="highlight hl-ipython3"><pre><span></span><span class="n">suite</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">TestSuite</span><span class="p">()</span>
 <span class="n">loader</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">defaultTestLoader</span>
 <span class="k">for</span> <span class="n">case</span> <span class="ow">in</span> <span class="p">[</span><span class="n">TestYearParsing</span><span class="p">,</span> <span class="n">TestPublisherNames</span><span class="p">,</span> <span class="n">TestCopyrightRules</span><span class="p">,</span>
              <span class="n">TestSparkTwins</span><span class="p">,</span> <span class="n">TestParsing</span><span class="p">,</span> <span class="n">TestAuthorDeaths</span><span class="p">,</span> <span class="n">TestStatus</span><span class="p">,</span>
-             <span class="n">TestDemandAndSupply</span><span class="p">,</span> <span class="n">TestWatchlist</span><span class="p">,</span> <span class="n">TestAuditAndRegimes</span><span class="p">,</span> <span class="n">TestStyle</span><span class="p">]:</span>
+             <span class="n">TestDemandAndSupply</span><span class="p">,</span> <span class="n">TestWatchlist</span><span class="p">,</span> <span class="n">TestAuditAndRegimes</span><span class="p">,</span> <span class="n">TestDumpDiscovery</span><span class="p">,</span> <span class="n">TestStyle</span><span class="p">]:</span>
     <span class="n">suite</span><span class="o">.</span><span class="n">addTests</span><span class="p">(</span><span class="n">loader</span><span class="o">.</span><span class="n">loadTestsFromTestCase</span><span class="p">(</span><span class="n">case</span><span class="p">))</span>
 <span class="c1"># write the per-test log to stdout so it is kept with the notebook</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">TextTestRunner</span><span class="p">(</span><span class="n">stream</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">,</span> <span class="n">verbosity</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">suite</span><span class="p">)</span>
@@ -9332,6 +9407,45 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputArea-child">
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_dated_beats_latest_and_gz_beats_txt (__main__.TestDumpDiscovery.test_dated_beats_latest_and_gz_beats_txt) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_dump_date_check (__main__.TestDumpDiscovery.test_dump_date_check) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_search_below_shared_root (__main__.TestDumpDiscovery.test_search_below_shared_root) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>test_pep8 (__main__.TestStyle.test_pep8) ... </pre>
 </div>
 </div>
@@ -9353,7 +9467,7 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>----------------------------------------------------------------------
-Ran 49 tests in 11.428s
+Ran 52 tests in 12.944s
 
 OK
 </pre>
@@ -9363,7 +9477,7 @@ OK
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>
-49 of 49 tests passed
+52 of 52 tests passed
 </pre>
 </div>
 </div>
