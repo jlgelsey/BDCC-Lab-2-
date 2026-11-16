@@ -166,6 +166,28 @@ def _has_dumps(path):
         return False
 
 
+def _newest_dump_folder(path):
+    """Return `path` if it holds dumps, else its newest subfolder that does.
+
+    On Jojie the dumps are stored one level down, in folders named after
+    the download date (201809, 20240420, 20260424, ...). Those names sort
+    in date order, so the subfolders are tried from the last name back,
+    and the newest month that actually holds dump files wins.
+    """
+    path = Path(path)
+    if _has_dumps(path):
+        return path
+    try:
+        subfolders = sorted((e.path for e in os.scandir(path)
+                             if e.is_dir()), reverse=True)
+    except OSError:
+        return None
+    for sub in subfolders:
+        if _has_dumps(sub):
+            return Path(sub)
+    return None
+
+
 def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT,
                      verbose=True):
     """Find the folder that holds the ol_dump_* files.
@@ -191,8 +213,9 @@ def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT,
     env_dir = os.environ.get("OL_DATA_DIR")
     candidates = ([env_dir] if env_dir else []) + list(DATA_DIR_CANDIDATES)
     for candidate in candidates:
-        if _has_dumps(candidate):
-            return Path(candidate)
+        found = _newest_dump_folder(candidate)
+        if found is not None:
+            return found
     root = Path(shared_root)
     looks_like_ol = re.compile(r"open.?lib|ol.?dump|^ol$|^ol[_-]", re.I)
     tried = []
@@ -209,16 +232,9 @@ def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT,
             tried.append(str(folder))
             if verbose:
                 print(f"Looking for dumps in {folder} ...")
-            if _has_dumps(folder):
-                return folder
-            try:
-                subfolders = sorted(e.path for e in os.scandir(folder)
-                                    if e.is_dir())
-            except OSError:
-                subfolders = []
-            for sub in subfolders:
-                if _has_dumps(sub):
-                    return Path(sub)
+            found = _newest_dump_folder(folder)
+            if found is not None:
+                return found
     raise FileNotFoundError(
         "No Open Library dumps (ol_dump_*.txt.gz) found"
         + (f" in {', '.join(tried)}" if tried else "")
@@ -2317,7 +2333,7 @@ def wilson_interval(successes, n, z=1.96):
 
 
 def group_intervals(profile, ratings):
-    """Uncertainty for the group comparisons of Sections 5.2 and 5.3.
+    """Uncertainty for the group comparisons of Sections 7.2 and 7.3.
 
     Shares get 95% Wilson intervals. Mean ratings get a 95% normal
     interval from the individual ratings (mean +/- 1.96 sd / sqrt(n)),
@@ -3004,7 +3020,7 @@ def plot_pipeline_diagram():
     report's colour system), the main operations, and the helper function
     that implements it, so the figure doubles as a map from the
     methodology to the code. Lanes underneath group the stages into the
-    three phases described in Section 4.1. Returns a matplotlib Figure.
+    three phases described in Section 4. Returns a matplotlib Figure.
     """
     from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
@@ -3086,9 +3102,9 @@ def plot_pipeline_diagram():
         arrow(10.1, y, 10.55, 3.35, color)
     arrow(11.98, 2.2, 11.98, 1.9, AMBER)
 
-    lane(0.1, 7.1, "INGEST ONCE  (Sections 4.2-4.3)", INK)
-    lane(7.55, 10.1, "ANALYSE EVERY WORK  (4.4-4.7)", PLUM)
-    lane(10.55, 13.4, "SELECT & VERIFY  (4.8-4.10)", AMBER)
+    lane(0.1, 7.1, "INGEST ONCE  (Sections 5.2-5.4)", INK)
+    lane(7.55, 10.1, "ANALYSE EVERY WORK  (6.1-6.4)", PLUM)
+    lane(10.55, 13.4, "SELECT & VERIFY  (6.5-6.7)", AMBER)
     fig.tight_layout()
     return fig
 
