@@ -7890,11 +7890,11 @@ folder, which is deleted afterwards.</p>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
 <h2 id="1-Rule-functions">1 Rule functions<a class="anchor-link" href="#1-Rule-functions">¶</a></h2><p>These tests pin the behaviour at the boundaries, where off-by-one
-mistakes happen. On <strong>1 January 2027</strong> a US work published in 1931
+mistakes happen. On <strong>January 1, 2027</strong> a US work published in 1931
 reaches the end of its 95-year term (1931 + 95 = 2026, protected until
-31 December 2026). In the Philippines, an author who died in 1976 has
-been protected for 50 years counted from 1 January 1977, which ends on
-31 December 2026.</p>
+December 31, 2026). In the Philippines, an author who died in 1976 has
+been protected for 50 years counted from January 1, 1977, which ends on
+December 31, 2026.</p>
 </div>
 </div>
 </div>
@@ -7931,7 +7931,7 @@ been protected for 50 years counted from 1 January 1977, which ends on
         <span class="n">cases</span> <span class="o">=</span> <span class="p">{</span>
             <span class="s2">"1901.7."</span><span class="p">:</span> <span class="mi">1901</span><span class="p">,</span>
             <span class="s2">"1963)"</span><span class="p">:</span> <span class="mi">1963</span><span class="p">,</span>
-            <span class="s2">"31 October 1987"</span><span class="p">:</span> <span class="mi">1987</span><span class="p">,</span>
+            <span class="s2">"October 31, 1987"</span><span class="p">:</span> <span class="mi">1987</span><span class="p">,</span>
             <span class="s2">"c. 1850 or 1851"</span><span class="p">:</span> <span class="mi">1851</span><span class="p">,</span>
             <span class="s2">"1016"</span><span class="p">:</span> <span class="mi">1016</span><span class="p">,</span>
             <span class="s2">"384 BC"</span><span class="p">:</span> <span class="o">-</span><span class="mi">384</span><span class="p">,</span>
@@ -7979,7 +7979,7 @@ been protected for 50 years counted from 1 January 1977, which ends on
                 <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">us_status</span><span class="p">(</span><span class="n">year</span><span class="p">),</span> <span class="n">expected</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">test_us_rule_moves_with_reference_year</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-        <span class="c1"># On 1 Jan 2028 the 1932 works enter and 1931 works are PD.</span>
+        <span class="c1"># On Jan 1, 2028 the 1932 works enter and 1931 works are PD.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">us_status</span><span class="p">(</span><span class="mi">1932</span><span class="p">,</span> <span class="n">reference_year</span><span class="o">=</span><span class="mi">2028</span><span class="p">),</span>
                          <span class="s2">"enters"</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">us_status</span><span class="p">(</span><span class="mi">1931</span><span class="p">,</span> <span class="n">reference_year</span><span class="o">=</span><span class="mi">2028</span><span class="p">),</span> <span class="s2">"pd"</span><span class="p">)</span>
@@ -8705,7 +8705,7 @@ so the module stays easy to read for the peer reviewers.</p>
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="6-Locating-the-dumps-on-Jojie">6 Locating the dumps on Jojie<a class="anchor-link" href="#6-Locating-the-dumps-on-Jojie">¶</a></h2><p>The report reads one fixed folder, <code>/mnt/data/public/openlibrary/20221007</code> (the only snapshot there with separate works, editions, authors, reading-log and ratings dumps). These tests check that this is the default folder, that a missing folder is an error rather than a silent fallback, that discovery accepts dated, <code>latest</code> and uncompressed files, that the optional Wikidata dump may be absent, and that the date check recognises the snapshot's <code>latest</code> files as the 30 September 2022 dump.</p>
+<h2 id="6-Locating-the-dumps-on-Jojie">6 Locating the dumps on Jojie<a class="anchor-link" href="#6-Locating-the-dumps-on-Jojie">¶</a></h2><p>The report reads one fixed folder, <code>/mnt/data/public/openlibrary/20221007</code> (the only snapshot there with separate works, editions, authors, reading-log and ratings dumps). These tests check that this is the default folder, that a missing folder is an error rather than a silent fallback, that discovery accepts dated, <code>latest</code> and uncompressed files, that the optional Wikidata dump may be absent, and that the date check recognises the snapshot's <code>latest</code> files as the September 30, 2022 dump.</p>
 </div>
 </div>
 </div>
@@ -10149,7 +10149,7 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>----------------------------------------------------------------------
-Ran 73 tests in 46.353s
+Ran 73 tests in 104.300s
 
 OK
 </pre>

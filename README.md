@@ -1,7 +1,7 @@
 # Wanted but Out of Print: Screening Open Library for Books Entering the Public Domain in 2027 (BDCC Lab 2)
 
 This project estimates which Open Library works are already in the public
-domain, or enter it on 1 January 2027, in the United States
+domain, or enter it on January 1, 2027, in the United States
 (publication-based term) and in the Philippines (life of the author plus
 50 years). It then measures reader demand from reading-log shelves and
 ratings and current supply from recent editions, publishers, digitized
@@ -16,7 +16,7 @@ advice.
 
 The report reads one fixed folder on Jojie,
 `/mnt/data/public/openlibrary/20221007`, which holds Open Library's
-export of 30 September 2022 (47 GiB, seven files; all seven are used).
+export of September 30, 2022 (47 GiB, seven files; all seven are used).
 It is the only snapshot on Jojie with the reading-log and ratings dumps
 and with separate works, editions and authors dumps, since the later
 snapshots hold only the revision history (`ol_cdump`). Section 2.2 of the

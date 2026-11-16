@@ -69,9 +69,9 @@ REFERENCE_YEAR = REFERENCE_DATE.year
 DATA_ROOT = "/mnt/data/public/openlibrary"
 DATA_SNAPSHOT = "20221007"
 
-# The snapshot is Open Library's dump of 30 September 2022 (its newest
+# The snapshot is Open Library's dump of September 30, 2022 (its newest
 # reading-log and rating entries are dated that day; the copy on Jojie was
-# made on 7 October 2022). Later years in a record are impossible.
+# made on October 7, 2022). Later years in a record are impossible.
 DUMP_DATE = date(2022, 9, 30)
 MAX_VALID_YEAR = DUMP_DATE.year
 MIN_VALID_YEAR = 1450  # printing with movable type in Europe
@@ -2130,12 +2130,12 @@ def death_year_history(revisions, author_deaths):
 # PART 5: COPYRIGHT STATUS ESTIMATES
 # ---------------------------------------------------------------------------
 #
-# The rules below describe the position on 1 January 2027.
+# The rules below describe the position on January 1, 2027.
 #
 # United States (17 U.S.C. sections 302-304; publication-based for older
 # works). A work published in year Y before 1978 is protected for 95 years,
-# ending on 31 December of year Y + 95, so it is public domain from
-# 1 January of Y + 96.
+# ending on December 31 of year Y + 95, so it is public domain from
+# January 1 of Y + 96.
 #   * published 1930 or earlier ............ public domain already
 #   * published 1931 ....................... enters the public domain 2027
 #   * published 1932-1963 .................. PD only if the copyright was
@@ -2147,7 +2147,7 @@ def death_year_history(revisions, author_deaths):
 #     1978-2002)
 #
 # Philippines (Republic Act 8293, sections 213-214). Protection lasts for
-# the life of the author plus 50 years, counted from 1 January of the year
+# the life of the author plus 50 years, counted from January 1 of the year
 # after death. For several authors the last surviving author counts.
 #   * last author died 1975 or earlier ..... public domain already
 #   * last author died 1976 ................ enters the public domain 2027
@@ -2159,7 +2159,7 @@ def death_year_history(revisions, author_deaths):
 
 US_LABELS = {
     "pd": "Public domain (published 1930 or earlier)",
-    "enters": "Enters public domain 1 Jan 2027 (published 1931)",
+    "enters": "Enters public domain Jan 1, 2027 (published 1931)",
     "renewal": "Renewal unknown (published 1932-1963)",
     "protected_pre78": "Protected (published 1964-1977)",
     "protected_post78": "Protected (published 1978 or later)",
@@ -2167,14 +2167,14 @@ US_LABELS = {
 }
 PH_LABELS = {
     "pd": "Public domain (last author died 1975 or earlier)",
-    "enters": "Enters public domain 1 Jan 2027 (last author died 1976)",
+    "enters": "Enters public domain Jan 1, 2027 (last author died 1976)",
     "protected": "Protected (last author died 1977 or later)",
     "unknown_death": "Unknown (an author's death year is missing)",
     "unknown_author": "Unknown (no author linked)",
 }
 LIFE70_LABELS = {
     "pd": "Public domain (died 1955 or earlier)",
-    "enters": "Enters public domain 1 Jan 2027 (died 1956)",
+    "enters": "Enters public domain Jan 1, 2027 (died 1956)",
     "protected": "Protected (died 1957 or later)",
     "unknown": "Unknown",
 }
@@ -2184,7 +2184,7 @@ def us_status(first_year, reference_year=REFERENCE_YEAR):
     """US status code from a first-publication year (pure Python).
 
     Returns one of the US_LABELS keys. The year that enters the public
-    domain on 1 January of reference_year is reference_year - 96.
+    domain on January 1 of reference_year is reference_year - 96.
     """
     if first_year is None:
         return "unknown"
@@ -2204,8 +2204,8 @@ def life_plus_status(last_death_year, n_authors, n_with_death, term,
                      reference_year=REFERENCE_YEAR):
     """Status code for a "life + term years" rule (pure Python).
 
-    Protection ends on 31 December of death_year + term, so the year that
-    enters the public domain on 1 January of reference_year is
+    Protection ends on December 31 of death_year + term, so the year that
+    enters the public domain on January 1 of reference_year is
     reference_year - term - 1. All authors must have a death year.
     """
     if n_authors == 0:
@@ -2425,7 +2425,7 @@ def status_by_regime(status):
         if regime == "us":
             return (
                 F.when(F.col(code_col) == "pd", "Public domain already")
-                .when(F.col(code_col) == "enters", "Enters 1 Jan 2027")
+                .when(F.col(code_col) == "enters", "Enters Jan 1, 2027")
                 .when(F.col(code_col) == "renewal",
                       "Renewal unknown (US only)")
                 .when(F.col(code_col).startswith("protected"), "Protected")
@@ -2433,7 +2433,7 @@ def status_by_regime(status):
             )
         return (
             F.when(F.col(code_col) == "pd", "Public domain already")
-            .when(F.col(code_col) == "enters", "Enters 1 Jan 2027")
+            .when(F.col(code_col) == "enters", "Enters Jan 1, 2027")
             .when(F.col(code_col) == "protected", "Protected")
             .otherwise("Unknown (missing data)")
         )
@@ -2443,7 +2443,7 @@ def status_by_regime(status):
         group("ph_code", "life").alias("Philippines (life + 50)"),
         group("life70_code", "life").alias("Life + 70 (comparison)"),
     )
-    order = ["Public domain already", "Enters 1 Jan 2027",
+    order = ["Public domain already", "Enters Jan 1, 2027",
              "Renewal unknown (US only)", "Protected",
              "Unknown (missing data)"]
     tables = []
@@ -2451,7 +2451,7 @@ def status_by_regime(status):
         counts = row.groupBy(column).count().toPandas()
         tables.append(counts.set_index(column)["count"].rename(column))
     return (pd.concat(tables, axis=1).reindex(order).fillna(0)
-            .astype(int).rename_axis("Status on 1 Jan 2027"))
+            .astype(int).rename_axis("Status on Jan 1, 2027"))
 
 
 def first_year_histogram(status, start=1800, end=MAX_VALID_YEAR):
@@ -2878,7 +2878,7 @@ def selection_funnel(profile, min_want_to_read, max_recent_editions=1):
         "2027 watchlist": [
             ("all works in the catalogue", F.lit(True)),
             ("no data-quality flag", unflagged),
-            ("enters the public domain on 1 Jan 2027", entering),
+            ("enters the public domain on Jan 1, 2027", entering),
             (f"high demand (>= {min_want_to_read} Want-to-Read)", demand),
             (f"low supply (<= {max_recent_editions} edition since "
              f"{RECENT_FROM_YEAR})",
@@ -3766,7 +3766,7 @@ def plot_status_bars(us_table, ph_table):
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="x", alpha=0.25)
         ax.set_axisbelow(True)
-    fig.suptitle("Estimated rights status on 1 January 2027")
+    fig.suptitle("Estimated rights status on January 1, 2027")
     fig.tight_layout()
     return fig
 
@@ -3788,7 +3788,7 @@ def plot_monthly_wtr(monthly):
         _style(ax)
     axes[-1].set_xlabel("Month logged")
     fig.suptitle("Want-to-Read entries per month, by rights group "
-                 f"(entries still on a shelf on {DUMP_DATE:%d %b %Y})")
+                 f"(entries still on a shelf on {DUMP_DATE:%b %-d, %Y})")
     fig.tight_layout()
     return fig
 
