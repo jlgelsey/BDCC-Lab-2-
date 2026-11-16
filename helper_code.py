@@ -153,22 +153,31 @@ def create_spark(app_name="ol-pd-radar", driver_memory=None,
 
 
 def _has_dumps(path):
-    """True if a folder directly contains Open Library dump files."""
-    path = Path(path)
+    """True if a folder directly contains Open Library dump files.
+
+    os.scandir stops at the first matching name, so a folder that does
+    hold the dumps is recognised without listing all of it.
+    """
     try:
-        return path.is_dir() and any(path.glob("ol_dump_*.txt*"))
-    except OSError:          # unreadable folder on a shared server
+        with os.scandir(path) as entries:
+            return any(e.name.startswith("ol_dump_") and ".txt" in e.name
+                       for e in entries)
+    except OSError:          # missing or unreadable folder
         return False
 
 
-def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT):
+def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT,
+                     verbose=True):
     """Find the folder that holds the ol_dump_* files.
 
     The search order is: an explicit argument, the OL_DATA_DIR environment
-    variable, the folders in DATA_DIR_CANDIDATES, and finally every folder
-    up to two levels below `shared_root` (the class data root on Jojie).
-    An explicit folder that does not exist raises an error instead of
-    silently falling back to another one.
+    variable, the folders in DATA_DIR_CANDIDATES, and finally the folders
+    under `shared_root` (the class data root on Jojie) whose names look
+    like Open Library, plus their direct subfolders. Only those folders
+    are opened: listing every dataset on a shared server can take many
+    minutes, because some folders hold millions of files. An explicit
+    folder that does not exist raises an error instead of silently
+    falling back to another one.
 
     Returns
     -------
@@ -185,14 +194,36 @@ def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT):
         if _has_dumps(candidate):
             return Path(candidate)
     root = Path(shared_root)
+    looks_like_ol = re.compile(r"open.?lib|ol.?dump|^ol$|^ol[_-]", re.I)
+    tried = []
     if root.is_dir():
-        for pattern in ("*", "*/*"):
-            for folder in sorted(root.glob(pattern)):
-                if _has_dumps(folder):
-                    return folder
+        try:
+            names = sorted(entry.name for entry in os.scandir(root)
+                           if entry.is_dir())
+        except OSError:
+            names = []
+        for name in names:
+            if not looks_like_ol.search(name):
+                continue
+            folder = root / name
+            tried.append(str(folder))
+            if verbose:
+                print(f"Looking for dumps in {folder} ...")
+            if _has_dumps(folder):
+                return folder
+            try:
+                subfolders = sorted(e.path for e in os.scandir(folder)
+                                    if e.is_dir())
+            except OSError:
+                subfolders = []
+            for sub in subfolders:
+                if _has_dumps(sub):
+                    return Path(sub)
     raise FileNotFoundError(
-        "No Open Library dumps (ol_dump_*.txt.gz) found. Set OL_DATA_DIR "
-        "to the folder that holds them, or place them in ./data"
+        "No Open Library dumps (ol_dump_*.txt.gz) found"
+        + (f" in {', '.join(tried)}" if tried else "")
+        + ". Set OL_DATA_DIR to the folder that holds them, or place them "
+        "in ./data"
     )
 
 
@@ -1615,10 +1646,11 @@ def compare_groups(profile):
             F.sum("wtr_last_12m").alias("wtr_last_12m"),
             F.sum("wtr_prev_12m").alias("wtr_prev_12m"),
             F.sum("ratings_count").alias("ratings"),
-            F.round(
-                F.sum(F.col("ratings_mean") * F.col("ratings_count"))
-                / F.sum("ratings_count"), 2
-            ).alias("mean_rating"),
+            # try_divide returns null for a group with no ratings, where
+            # plain division raises an error under Spark 4's ANSI mode
+            F.round(F.try_divide(
+                F.sum(F.col("ratings_mean") * F.col("ratings_count")),
+                F.sum("ratings_count")), 2).alias("mean_rating"),
         ).toPandas()
     )
     # growth of Want-to-Read entries, last 12 months vs the 12 before
@@ -1682,7 +1714,7 @@ DISPLAY_COLUMNS = [
     "ph_code", "want_to_read", "wtr_last_12m", "ratings_count",
     "ratings_mean", "n_editions", "n_recent_editions",
     "n_recent_publishers", "n_digitized", "n_filipino_editions",
-    "gap_after_death",
+    "latest_edition_year", "gap_after_death",
 ]
 
 
@@ -1743,7 +1775,7 @@ def _finish_list(selected, order, top_n, authors):
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
     # whole years read better as integers; Int64 keeps missing values
-    for column in ["first_year", "last_death_year"]:
+    for column in ["first_year", "last_death_year", "latest_edition_year"]:
         table[column] = table[column].astype("Int64")
     table["ratings_mean"] = table["ratings_mean"].round(2)
     columns = DISPLAY_COLUMNS[:2] + (["authors"] if authors is not None
@@ -2019,6 +2051,496 @@ def philippine_authors_summary(profile):
         .assign(**{"PH status": lambda t: t["ph_code"].map(PH_LABELS)})
         .sort_values("works", ascending=False).reset_index(drop=True)
     )
+
+
+# ---------------------------------------------------------------------------
+# PART 8b: ANALYTICAL CHECKS (EXPLORATION, UNCERTAINTY, ROBUSTNESS)
+# ---------------------------------------------------------------------------
+
+
+def parsing_rule_examples():
+    """Show the parsing rules on typical messy inputs from the dumps.
+
+    The Spark pipeline applies these rules as column expressions; the
+    pure-Python twins used here give identical answers (TEST.ipynb checks
+    this), so the table documents exactly what the pipeline does with
+    each kind of input.
+
+    Returns
+    -------
+    DataFrame
+        rule, raw input, parsed output.
+    """
+    rows = []
+    for text in ["February 27, 1997", "c1931", "1931-1932", "19--",
+                 "2030"]:
+        rows.append(("publication year (first plausible year)", text,
+                     parse_year(text)))
+    for text in ["1963)", "c. 1850 or 1851", "384 BC"]:
+        rows.append(("life year (latest year, BC negative)", text,
+                     parse_life_year(text)))
+    for text in ["+1976-01-12T00:00:00Z", "-0384-00-00T00:00:00Z"]:
+        rows.append(("Wikidata time value", text,
+                     parse_wikidata_time_year(text)))
+    for text in ["Penguin Books Ltd.", "Simon & Schuster, Inc."]:
+        rows.append(("publisher name", text, normalize_publisher(text)))
+    for ol_year, wd_year in [(1951, 1950), (1951, None), (None, None)]:
+        year, source = choose_death_year(ol_year, wd_year)
+        rows.append(("death year (Open Library, Wikidata)",
+                     f"{ol_year}, {wd_year}", f"{year} from {source}"))
+    table = pd.DataFrame(rows, columns=["rule", "raw input", "parsed"])
+    table["parsed"] = table["parsed"].map(
+        lambda v: "no year" if v is None else str(v))
+    return table
+
+
+def demand_concentration(profile):
+    """How unequally Want-to-Read entries are spread over shelved works.
+
+    Only the frequency table (how many works have exactly k entries) is
+    brought to pandas, so the computation stays small even though it
+    covers every shelved work.
+
+    Returns
+    -------
+    dict
+        lorenz (cumulative share of works vs share of entries, works
+        ordered from least to most wanted), top_shares (share of entries
+        held by the top 0.1%, 1% and 10% of works) and gini (0 = equal,
+        1 = all entries on one work).
+    """
+    from pyspark.sql import functions as F
+
+    freq = (profile.filter(F.col("want_to_read") > 0)
+            .groupBy("want_to_read").count().toPandas()
+            .sort_values("want_to_read").reset_index(drop=True))
+    works = freq["count"].sum()
+    entries = (freq["want_to_read"] * freq["count"]).sum()
+    cum_works = freq["count"].cumsum() / works
+    cum_entries = (freq["want_to_read"] * freq["count"]).cumsum() / entries
+    lorenz = pd.DataFrame({
+        "share_of_works": np.concatenate([[0.0], cum_works.to_numpy()]),
+        "share_of_entries": np.concatenate([[0.0],
+                                            cum_entries.to_numpy()]),
+    })
+    # Gini = 1 - 2 x area under the Lorenz curve (trapezoid rule)
+    x, y = lorenz["share_of_works"], lorenz["share_of_entries"]
+    area = float(np.sum((x.diff().fillna(0)) * (y + y.shift(1).fillna(0))
+                        / 2))
+    gini = 1 - 2 * area
+
+    def top_share(fraction):
+        # walk down from the most-wanted works until `fraction` of works
+        # are covered, taking a partial group at the boundary
+        remaining = fraction * works
+        held = 0.0
+        for k, n in zip(freq["want_to_read"][::-1], freq["count"][::-1]):
+            take = min(n, remaining)
+            held += take * k
+            remaining -= take
+            if remaining <= 0:
+                break
+        return held / entries
+
+    top = pd.DataFrame({
+        "top share of shelved works": ["0.1%", "1%", "10%"],
+        "share of all Want-to-Read entries (%)": [
+            round(100 * top_share(f), 1) for f in (0.001, 0.01, 0.1)],
+    })
+    return {"lorenz": lorenz, "top_shares": top, "gini": round(gini, 3),
+            "shelved_works": int(works), "entries": int(entries)}
+
+
+def demand_by_decade(profile, start=1800, end=2000):
+    """Demand and supply of works grouped by decade of first publication.
+
+    This is the bivariate view behind the whole project: if old works
+    were simply unwanted, a public-domain opportunity would not exist.
+    The default stops at the 2000s because a work first published from
+    2017 on counts as having a recent edition by definition, which would
+    make the supply column meaningless for the 2010s and 2020s.
+
+    Returns
+    -------
+    DataFrame
+        decade, works, pct_shelved (any Want-to-Read entry),
+        wtr_per_shelved_work, mean_rating (weighted by ratings),
+        pct_recent_edition.
+    """
+    from pyspark.sql import functions as F
+
+    decade = (F.floor(F.col("first_year") / 10) * 10).cast("int")
+    table = (
+        profile.filter(F.col("first_year").between(start, end + 9))
+        .groupBy(decade.alias("decade"))
+        .agg(
+            F.count(F.lit(1)).alias("works"),
+            F.round(100 * F.avg((F.col("want_to_read") > 0).cast("int")),
+                    2).alias("pct_shelved"),
+            # try_divide gives null, not an error, for a decade with no
+            # shelved or rated works
+            F.round(F.try_divide(
+                F.sum("want_to_read"),
+                F.sum((F.col("want_to_read") > 0).cast("int"))),
+                2).alias("wtr_per_shelved_work"),
+            F.round(F.try_divide(
+                F.sum(F.col("ratings_mean") * F.col("ratings_count")),
+                F.sum("ratings_count")), 2).alias("mean_rating"),
+            F.round(100 * F.avg((F.col("n_recent_editions") > 0)
+                                .cast("int")), 2).alias(
+                "pct_recent_edition"),
+        )
+        .toPandas().sort_values("decade").reset_index(drop=True)
+    )
+    return table
+
+
+def demand_supply_correlation(profile, max_rows=200_000):
+    """Spearman correlation between demand and supply in each US group.
+
+    If publishers follow readers, works with more Want-to-Read entries
+    should have more recent editions. Spearman's rho is used because both
+    counts are heavily skewed. Each group is limited to a random sample of
+    at most `max_rows` shelved works (seed fixed), which keeps the pandas
+    step small; rho on 200,000 works is precise to about +/-0.005.
+
+    Returns
+    -------
+    DataFrame
+        US status, shelved works, sample size, rho with recent editions,
+        rho with all editions, rho with digitized copies.
+    """
+    from pyspark.sql import functions as F
+
+    shelved = profile.filter(F.col("want_to_read") > 0).select(
+        "us_code", "want_to_read", "n_recent_editions", "n_editions",
+        "n_digitized")
+    sizes = {r["us_code"]: r["count"]
+             for r in shelved.groupBy("us_code").count().collect()}
+    rows = []
+    for code in US_LABELS:
+        n = sizes.get(code, 0)
+        if n < 30:
+            continue
+        fraction = min(1.0, max_rows / n)
+        sample = shelved.filter(F.col("us_code") == code).sample(
+            False, fraction, SEED).toPandas()
+        corr = sample.drop(columns="us_code").corr(method="spearman")
+        rows.append({
+            "US status": US_LABELS[code],
+            "shelved works": n,
+            "sample": len(sample),
+            "rho: recent editions": round(
+                corr.loc["want_to_read", "n_recent_editions"], 3),
+            "rho: all editions": round(
+                corr.loc["want_to_read", "n_editions"], 3),
+            "rho: digitized copies": round(
+                corr.loc["want_to_read", "n_digitized"], 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def demand_persistence(reading_log, cutoff=date(2025, 10, 31),
+                       quantile=0.99, months=12):
+    """Hold-out check: do works wanted before a cutoff stay wanted after?
+
+    Want-to-Read counts up to `cutoff` are treated as the "fitting"
+    period, and the entries logged in the following `months` months as
+    the hold-out period, which plays no part in defining the groups. If
+    cumulative Want-to-Read entries were mostly noise, the works in the
+    top `quantile` before the cutoff would not stand out afterwards.
+
+    Returns
+    -------
+    dict
+        table (one row per pre-cutoff group: works, share receiving any
+        new entry, mean new entries, share of all new entries), threshold
+        (the pre-cutoff count at `quantile`) and rho (Spearman between
+        pre- and post-cutoff counts on a 200,000-work sample of works
+        shelved before the cutoff).
+    """
+    from pyspark.sql import functions as F
+
+    end = F.add_months(F.lit(cutoff.isoformat()).cast("date"), months)
+    cut = F.lit(cutoff.isoformat()).cast("date")
+    wtr = reading_log.filter(F.col("shelf") == "Want to Read")
+    per_work = wtr.groupBy("work_key").agg(
+        F.sum((F.col("logged_date") <= cut).cast("int")).alias("before"),
+        F.sum(((F.col("logged_date") > cut)
+               & (F.col("logged_date") <= end)).cast("int")).alias("after"),
+    ).cache()
+    threshold = int(per_work.filter(F.col("before") > 0).agg(
+        F.percentile_approx("before", quantile, 10000)).collect()[0][0])
+    group = (F.when(F.col("before") >= threshold,
+                    f"top {100 - 100 * quantile:.0f}% before cutoff")
+             .when(F.col("before") > 0, "other works shelved before cutoff")
+             .otherwise("first shelved after cutoff"))
+    table = per_work.groupBy(group.alias("group")).agg(
+        F.count(F.lit(1)).alias("works"),
+        F.round(100 * F.avg((F.col("after") > 0).cast("int")), 2).alias(
+            "pct_with_new_entry"),
+        F.round(F.avg("after"), 3).alias("mean_new_entries"),
+        F.sum("after").alias("new_entries"),
+    ).toPandas()
+    total_new = table["new_entries"].sum()
+    table["pct_of_new_entries"] = (100 * table["new_entries"]
+                                   / total_new).round(1)
+    order = {f"top {100 - 100 * quantile:.0f}% before cutoff": 0,
+             "other works shelved before cutoff": 1,
+             "first shelved after cutoff": 2}
+    table = table.sort_values("group", key=lambda c: c.map(order))
+    shelved = per_work.filter(F.col("before") > 0)
+    n = shelved.count()
+    sample = shelved.sample(False, min(1.0, 200_000 / max(n, 1)),
+                            SEED).select("before", "after").toPandas()
+    rho = (round(sample.corr(method="spearman").iloc[0, 1], 3)
+           if len(sample) > 2 else np.nan)
+    per_work.unpersist()
+    return {"table": table.reset_index(drop=True), "threshold": threshold,
+            "rho": rho, "cutoff": cutoff.isoformat()}
+
+
+def wilson_interval(successes, n, z=1.96):
+    """95% Wilson score interval for a proportion, in percent.
+
+    Unlike the plain normal approximation it never leaves [0, 100] and
+    stays sensible for proportions close to 0, which matters here because
+    shares such as "has a Filipino edition" are around 0.01%.
+    """
+    if n == 0:
+        return (np.nan, np.nan)
+    p = successes / n
+    denom = 1 + z ** 2 / n
+    centre = (p + z ** 2 / (2 * n)) / denom
+    half = z * np.sqrt(p * (1 - p) / n + z ** 2 / (4 * n ** 2)) / denom
+    return (100 * (centre - half), 100 * (centre + half))
+
+
+def group_intervals(profile, ratings):
+    """Uncertainty for the group comparisons of Sections 5.2 and 5.3.
+
+    Shares get 95% Wilson intervals. Mean ratings get a 95% normal
+    interval from the individual ratings (mean +/- 1.96 sd / sqrt(n)),
+    computed by joining every rating to its work's US group.
+
+    Returns
+    -------
+    DataFrame
+        One row per US group with each estimate and its interval.
+    """
+    from pyspark.sql import functions as F
+
+    counts = profile.groupBy("us_code").agg(
+        F.count(F.lit(1)).alias("works"),
+        F.sum((F.col("want_to_read") > 0).cast("int")).alias("shelved"),
+        F.sum((F.col("n_recent_editions") > 0).cast("int")).alias(
+            "recent"),
+        F.sum((F.col("n_filipino_editions") > 0).cast("int")).alias(
+            "filipino"),
+    ).toPandas().set_index("us_code")
+    stars = (ratings.filter(F.col("rating").isNotNull())
+             .join(profile.select("work_key", "us_code"), "work_key")
+             .groupBy("us_code").agg(
+                 F.count(F.lit(1)).alias("ratings"),
+                 F.avg("rating").alias("mean"),
+                 F.stddev("rating").alias("sd"))
+             .toPandas().set_index("us_code"))
+    rows = []
+    for code in US_LABELS:
+        if code not in counts.index:
+            continue
+        c = counts.loc[code]
+        row = {"US status": US_LABELS[code], "works": int(c["works"])}
+        for column, label in [("shelved", "% shelved"),
+                              ("recent", "% with recent edition"),
+                              ("filipino", "% with Filipino edition")]:
+            share = 100 * c[column] / c["works"]
+            low, high = wilson_interval(c[column], c["works"])
+            decimals = 3 if column == "filipino" else 2
+            row[label] = (f"{share:.{decimals}f} "
+                          f"[{low:.{decimals}f}, {high:.{decimals}f}]")
+        if code in stars.index:
+            r = stars.loc[code]
+            half = 1.96 * r["sd"] / np.sqrt(r["ratings"])
+            row["mean stars"] = (f"{r['mean']:.3f} "
+                                 f"[{r['mean'] - half:.3f}, "
+                                 f"{r['mean'] + half:.3f}]")
+            row["ratings"] = int(r["ratings"])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def sensitivity_to_choices(profile, author_deaths, min_want_to_read,
+                           max_recent_editions=1):
+    """Recount the headline groups under alternative data-handling choices.
+
+    Two choices drive the rights estimates, so each is varied while
+    everything else stays fixed:
+
+    * first-publication year: the minimum of the work record and the
+      earliest edition (used in the report), the work record whenever it
+      exists, or the earliest edition only;
+    * death year: Wikidata preferred (used in the report), Open Library
+      only, or the later of the two (most cautious).
+
+    For each variant the table reports works free and entering under the
+    affected rule and the size of the 2027 watchlist. Flags are kept as
+    computed for the main analysis, so the comparison isolates the choice.
+    """
+    from pyspark.sql import functions as F
+
+    base = profile.select(
+        "work_key", "author_keys", "work_year", "earliest_edition_year",
+        "first_year", "us_code", "ph_code", "flagged", "want_to_read",
+        "n_recent_editions").cache()
+    wanted = ((F.col("want_to_read") >= min_want_to_read)
+              & (F.col("n_recent_editions") <= max_recent_editions)
+              & ~F.col("flagged"))
+
+    def summarize(frame, us_col, ph_col, choice, variant):
+        enters = (F.col(us_col) == "enters") | (F.col(ph_col) == "enters")
+        r = frame.agg(
+            F.sum((F.col(us_col) == "pd").cast("int")).alias("us_pd"),
+            F.sum((F.col(us_col) == "enters").cast("int")).alias(
+                "us_enters"),
+            F.sum((F.col(ph_col) == "pd").cast("int")).alias("ph_pd"),
+            F.sum((F.col(ph_col) == "enters").cast("int")).alias(
+                "ph_enters"),
+            F.sum((enters & wanted).cast("int")).alias("watchlist"),
+        ).collect()[0]
+        return {"choice": choice, "variant": variant, **r.asDict()}
+
+    rows = []
+    year_variants = {
+        "min(work record, earliest edition) [used]": F.col("first_year"),
+        "work record if present, else earliest edition":
+            F.coalesce("work_year", "earliest_edition_year"),
+        "earliest edition only": F.col("earliest_edition_year"),
+    }
+    for variant, expr in year_variants.items():
+        frame = base.withColumn("us_alt", us_status_column(expr))
+        rows.append(summarize(frame, "us_alt", "ph_code",
+                              "first-publication year", variant))
+
+    deaths = author_deaths.select("author_key", "wd_death_year",
+                                  "ol_death_year")
+    per_work = (base.select("work_key",
+                            F.explode("author_keys").alias("author_key"))
+                .join(deaths, "author_key", "left")
+                .withColumn("wd_first", F.coalesce("wd_death_year",
+                                                   "ol_death_year"))
+                .withColumn("latest", F.greatest("wd_death_year",
+                                                 "ol_death_year"))
+                .groupBy("work_key").agg(
+                    F.count(F.lit(1)).alias("n"),
+                    F.count("wd_first").alias("k_wd"),
+                    F.max("wd_first").alias("d_wd"),
+                    F.count("ol_death_year").alias("k_ol"),
+                    F.max("ol_death_year").alias("d_ol"),
+                    F.count("latest").alias("k_late"),
+                    F.max("latest").alias("d_late")))
+    joined = base.join(per_work, "work_key", "left").fillna(
+        0, subset=["n", "k_wd", "k_ol", "k_late"])
+    death_variants = {
+        "Wikidata preferred [used]": ("d_wd", "k_wd"),
+        "Open Library only": ("d_ol", "k_ol"),
+        "later of the two (cautious)": ("d_late", "k_late"),
+    }
+    for variant, (d, k) in death_variants.items():
+        frame = joined.withColumn("ph_alt", life_plus_status_column(
+            F.col(d), F.col("n"), F.col(k), 50))
+        rows.append(summarize(frame, "us_code", "ph_alt", "death year",
+                              variant))
+    base.unpersist()
+    return pd.DataFrame(rows)
+
+
+def fiction_split(profile, min_want_to_read):
+    """Compare fiction and non-fiction within the opportunity groups.
+
+    A work counts as fiction when any of its subjects contains the word
+    "fiction" (flag set during parsing). Translators and publishers
+    budget differently for novels and reference works, so the split tells
+    them what kind of books the lists actually contain.
+    """
+    from pyspark.sql import functions as F
+
+    groups = {
+        "all shelved works": F.col("want_to_read") > 0,
+        "potentially PD, high demand":
+            F.col("potentially_pd")
+            & (F.col("want_to_read") >= min_want_to_read),
+        "enters 2027, any demand":
+            F.col("enters_2027") & (F.col("want_to_read") > 0),
+        "enters 2027, high demand":
+            F.col("enters_2027")
+            & (F.col("want_to_read") >= min_want_to_read),
+    }
+    rows = []
+    for name, condition in groups.items():
+        r = profile.filter(condition).agg(
+            F.count(F.lit(1)).alias("works"),
+            F.round(100 * F.avg(F.col("is_fiction").cast("int")), 1).alias(
+                "pct_fiction"),
+            F.round(F.avg(F.when(F.col("is_fiction"), F.col("want_to_read"))),
+                    1).alias("mean_wtr_fiction"),
+            F.round(F.avg(F.when(~F.col("is_fiction"),
+                                 F.col("want_to_read"))), 1).alias(
+                "mean_wtr_nonfiction"),
+            F.round(100 * F.avg(F.when(
+                F.col("is_fiction"),
+                (F.col("n_recent_editions") > 0).cast("int"))), 1).alias(
+                "pct_recent_fiction"),
+            F.round(100 * F.avg(F.when(
+                ~F.col("is_fiction"),
+                (F.col("n_recent_editions") > 0).cast("int"))), 1).alias(
+                "pct_recent_nonfiction"),
+        ).collect()[0]
+        rows.append({"group": name, **r.asDict()})
+    return pd.DataFrame(rows)
+
+
+def translation_gaps(profile, min_want_to_read, min_languages=5,
+                     top_n=None, authors=None):
+    """Wanted free works already translated widely, but not into Filipino.
+
+    A work with editions in many languages has shown that it travels
+    across markets, so the absence of a Filipino edition is a concrete
+    gap for a Philippine translator. Selection: potentially public domain
+    or entering in 2027, at least `min_want_to_read` Want-to-Read
+    entries, editions in at least `min_languages` languages, and no
+    Tagalog or Filipino edition. Ranked by Want-to-Read entries.
+
+    Returns
+    -------
+    dict
+        count (works meeting every condition) and table (pandas top_n
+        rows with author names, or None when top_n is None).
+    """
+    from pyspark.sql import functions as F
+
+    selected = profile.filter(
+        (F.col("potentially_pd") | F.col("enters_2027"))
+        & (F.col("want_to_read") >= min_want_to_read)
+        & (F.col("n_languages") >= min_languages)
+        & (F.col("n_filipino_editions") == 0)
+    )
+    count = selected.count()
+    table = None
+    if top_n is not None:
+        top = selected.orderBy(F.desc("want_to_read"), "work_key").limit(
+            top_n)
+        if authors is not None:
+            top = add_author_names(top, authors)
+        table = top.select(
+            "title", *(["authors"] if authors is not None else []),
+            "first_year", "last_death_year", "us_code", "ph_code",
+            "want_to_read", "n_languages", "n_editions",
+            "n_recent_editions").toPandas().sort_values(
+            "want_to_read", ascending=False).reset_index(drop=True)
+        for column in ["first_year", "last_death_year"]:
+            table[column] = table[column].astype("Int64")
+    return {"count": count, "table": table}
 
 
 # ---------------------------------------------------------------------------
@@ -2567,5 +3089,82 @@ def plot_pipeline_diagram():
     lane(0.1, 7.1, "INGEST ONCE  (Sections 4.2-4.3)", INK)
     lane(7.55, 10.1, "ANALYSE EVERY WORK  (4.4-4.7)", PLUM)
     lane(10.55, 13.4, "SELECT & VERIFY  (4.8-4.10)", AMBER)
+    fig.tight_layout()
+    return fig
+
+
+def plot_demand_concentration(concentration):
+    """Lorenz curve of Want-to-Read entries across shelved works."""
+    lorenz = concentration["lorenz"]
+    fig, ax = plt.subplots(figsize=(6.2, 5.2))
+    ax.plot([0, 100], [0, 100], color=GREY, lw=1, ls="--",
+            label="perfect equality")
+    ax.plot(100 * lorenz["share_of_works"],
+            100 * lorenz["share_of_entries"], color=GREEN, lw=2.2,
+            label="Want-to-Read entries")
+    ax.fill_between(100 * lorenz["share_of_works"],
+                    100 * lorenz["share_of_entries"],
+                    100 * lorenz["share_of_works"], color=GREEN,
+                    alpha=0.12)
+    ax.set_xlabel("Cumulative share of shelved works (%), least wanted "
+                  "first")
+    ax.set_ylabel("Cumulative share of entries (%)")
+    ax.set_title(f"Demand is concentrated (Gini = "
+                 f"{concentration['gini']:.2f})")
+    ax.legend(loc="upper left")
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    _style(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_demand_by_decade(table):
+    """Three small panels sharing the decade axis: how often works are
+    shelved, how wanted shelved works are, and how often they have a
+    recent edition. Separate panels keep each measure on its own scale.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), sharex=True)
+    panels = [
+        ("pct_shelved", "Works with any Want-to-Read (%)", GREEN),
+        ("wtr_per_shelved_work", "Entries per shelved work", GREEN),
+        ("pct_recent_edition", "Works with an edition since 2017 (%)",
+         INK),
+    ]
+    for ax, (column, title, color) in zip(axes, panels):
+        ax.plot(table["decade"], table[column], color=color, lw=2,
+                marker="o", ms=4)
+        ax.axvspan(1925, 1935, color=AMBER, alpha=0.15, lw=0)
+        ax.set_title(title, fontsize=10.5)
+        ax.set_xlabel("Decade of first publication")
+        _style(ax)
+    axes[0].annotate("1930s: the 2027\\nentry cohort", xy=(1930, 0),
+                     xycoords=("data", "axes fraction"),
+                     xytext=(1840, 0.85), textcoords=("data",
+                                                      "axes fraction"),
+                     fontsize=8, color=AMBER)
+    fig.tight_layout()
+    return fig
+
+
+def plot_persistence(persistence):
+    """Share of works that received a new Want-to-Read entry in the
+    hold-out year, for each group defined before the cutoff."""
+    table = persistence["table"]
+    fig, ax = plt.subplots(figsize=(9, 3.4))
+    colors = [GREEN, INK_LIGHT, GREY][:len(table)]
+    bars = ax.barh(table["group"], table["pct_with_new_entry"],
+                   color=colors)
+    ax.invert_yaxis()
+    for bar, value in zip(bars, table["pct_with_new_entry"]):
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
+                f"{value:.1f}%", va="center", fontsize=9, color=TEXT)
+    ax.set_xlim(0, 105)
+    ax.set_xlabel(f"Works with at least one new Want-to-Read entry in the "
+                  f"12 months after {persistence['cutoff']} (%)")
+    ax.set_title("Works wanted before the cutoff stay wanted after it")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="x")
+    ax.set_axisbelow(True)
     fig.tight_layout()
     return fig

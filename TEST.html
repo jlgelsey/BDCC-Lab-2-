@@ -7832,7 +7832,8 @@ folder, which is deleted afterwards.</p>
 <div class="jp-InputPrompt jp-InputArea-prompt">In [1]:</div>
 <div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor" data-type="inline">
 <div class="cm-editor cm-s-jupyter">
-<div class="highlight hl-ipython3"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<div class="highlight hl-ipython3"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">date</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">gzip</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">importlib</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
@@ -8715,12 +8716,16 @@ so the module stays easy to read for the peer reviewers.</p>
     <span class="k">def</span><span class="w"> </span><span class="nf">test_search_below_shared_root</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryDirectory</span><span class="p">()</span> <span class="k">as</span> <span class="n">directory</span><span class="p">:</span>
             <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
-            <span class="n">target</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">"some-course"</span> <span class="o">/</span> <span class="s2">"openlibrary-2026"</span>
+            <span class="n">target</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">"openlibrary"</span> <span class="o">/</span> <span class="s2">"2026-10"</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="p">[</span><span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">])</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">root</span> <span class="o">/</span> <span class="s2">"other-dataset"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"notes.csv"</span><span class="p">])</span>
+            <span class="c1"># dumps inside an unrelated folder are deliberately not found:</span>
+            <span class="c1"># opening every dataset on a shared server is too slow</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">make_files</span><span class="p">(</span><span class="n">root</span> <span class="o">/</span> <span class="s2">"some-course"</span> <span class="o">/</span> <span class="s2">"copy"</span><span class="p">,</span>
+                            <span class="p">[</span><span class="s2">"ol_dump_works_2026-10-31.txt.gz"</span><span class="p">])</span>
             <span class="n">saved</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">"OL_DATA_DIR"</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
             <span class="k">try</span><span class="p">:</span>
-                <span class="n">found</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">resolve_data_dir</span><span class="p">(</span><span class="n">shared_root</span><span class="o">=</span><span class="n">root</span><span class="p">)</span>
+                <span class="n">found</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">resolve_data_dir</span><span class="p">(</span><span class="n">shared_root</span><span class="o">=</span><span class="n">root</span><span class="p">,</span>
+                                                <span class="n">verbose</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="k">if</span> <span class="n">saved</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                     <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"OL_DATA_DIR"</span><span class="p">]</span> <span class="o">=</span> <span class="n">saved</span>
@@ -8735,6 +8740,123 @@ so the module stays easy to read for the peer reviewers.</p>
         <span class="n">message</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">check_dump_date</span><span class="p">(</span><span class="n">other</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">message</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"WARNING"</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">assertIn</span><span class="p">(</span><span class="s2">"2026-11-30"</span><span class="p">,</span> <span class="n">message</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="jp-Cell jp-MarkdownCell jp-Notebook-cell" id="cell-id=4676868b">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
+</div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
+<h2 id="4d-Analytical-checks">4d Analytical checks<a class="anchor-link" href="#4d-Analytical-checks">¶</a></h2><p>These functions add exploration, uncertainty and robustness to the report. Each expected value below was worked out by hand from the fixture. For example, the two shelved works hold 3 and 1 Want-to-Read entries, so the Lorenz curve passes through (50%, 25%) and the Gini coefficient is 1 - 2 x 0.375 = 0.25.</p>
+</div>
+</div>
+</div>
+</div><div class="jp-Cell jp-CodeCell jp-Notebook-cell jp-mod-noOutputs" id="cell-id=42c6c083">
+<div class="jp-Cell-inputWrapper" tabindex="0">
+<div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
+</div>
+<div class="jp-InputArea jp-Cell-inputArea">
+<div class="jp-InputPrompt jp-InputArea-prompt">In [9]:</div>
+<div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor" data-type="inline">
+<div class="cm-editor cm-s-jupyter">
+<div class="highlight hl-ipython3"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">TestAnalyticalChecks</span><span class="p">(</span><span class="n">unittest</span><span class="o">.</span><span class="n">TestCase</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_parsing_rule_examples_match_rules</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">parsing_rule_examples</span><span class="p">()</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">table</span><span class="p">[</span><span class="n">table</span><span class="p">[</span><span class="s2">"raw input"</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"c. 1850 or 1851"</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s2">"parsed"</span><span class="p">],</span> <span class="s2">"1851"</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">table</span><span class="p">[</span><span class="n">table</span><span class="p">[</span><span class="s2">"raw input"</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"19--"</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s2">"parsed"</span><span class="p">],</span> <span class="s2">"no year"</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">table</span><span class="p">[</span><span class="n">table</span><span class="p">[</span><span class="s2">"raw input"</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"1951, 1950"</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s2">"parsed"</span><span class="p">],</span> <span class="s2">"1950 from wikidata"</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_demand_concentration</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">demand_concentration</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">((</span><span class="n">result</span><span class="p">[</span><span class="s2">"shelved_works"</span><span class="p">],</span> <span class="n">result</span><span class="p">[</span><span class="s2">"entries"</span><span class="p">]),</span>
+                         <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"gini"</span><span class="p">],</span> <span class="mf">0.25</span><span class="p">)</span>
+        <span class="n">top</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"top_shares"</span><span class="p">]</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"top share of shelved works"</span><span class="p">)</span>
+        <span class="c1"># 10% of 2 works = 0.2 of W1's 3 entries = 0.6 of 4 entries</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span>
+            <span class="n">top</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"10%"</span><span class="p">,</span> <span class="s2">"share of all Want-to-Read entries (%)"</span><span class="p">],</span> <span class="mf">15.0</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_demand_by_decade</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">demand_by_decade</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"decade"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="mi">1930</span><span class="p">,</span> <span class="s2">"works"</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>       <span class="c1"># W1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="mi">1930</span><span class="p">,</span> <span class="s2">"pct_shelved"</span><span class="p">],</span> <span class="mf">100.0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="mi">1930</span><span class="p">,</span> <span class="s2">"wtr_per_shelved_work"</span><span class="p">],</span> <span class="mf">3.0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="mi">1950</span><span class="p">,</span> <span class="s2">"pct_shelved"</span><span class="p">],</span> <span class="mf">0.0</span><span class="p">)</span>  <span class="c1"># W4</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_correlation_skips_small_groups</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># no US group has 30 shelved works in the fixture</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">demand_supply_correlation</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span><span class="o">.</span><span class="n">empty</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_persistence_hold_out</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">demand_persistence</span><span class="p">(</span><span class="n">tables</span><span class="p">[</span><span class="s2">"reading_log"</span><span class="p">],</span>
+                                           <span class="n">cutoff</span><span class="o">=</span><span class="n">date</span><span class="p">(</span><span class="mi">2025</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">31</span><span class="p">))</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"table"</span><span class="p">]</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"group"</span><span class="p">)</span>
+        <span class="n">top</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"top 1% before cutoff"</span><span class="p">]</span>
+        <span class="c1"># W1: one entry before the cutoff, two in the following year</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">((</span><span class="n">top</span><span class="p">[</span><span class="s2">"works"</span><span class="p">],</span> <span class="n">top</span><span class="p">[</span><span class="s2">"new_entries"</span><span class="p">]),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">top</span><span class="p">[</span><span class="s2">"pct_with_new_entry"</span><span class="p">],</span> <span class="mf">100.0</span><span class="p">)</span>
+        <span class="n">late</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"first shelved after cutoff"</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">late</span><span class="p">[</span><span class="s2">"new_entries"</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>            <span class="c1"># W3</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span><span class="n">top</span><span class="p">[</span><span class="s2">"pct_of_new_entries"</span><span class="p">],</span> <span class="mf">66.7</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_wilson_interval</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">low</span><span class="p">,</span> <span class="n">high</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">wilson_interval</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span><span class="n">low</span><span class="p">,</span> <span class="mf">23.66</span><span class="p">,</span> <span class="n">places</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span><span class="n">high</span><span class="p">,</span> <span class="mf">76.34</span><span class="p">,</span> <span class="n">places</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+        <span class="n">low</span><span class="p">,</span> <span class="n">high</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">wilson_interval</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertAlmostEqual</span><span class="p">(</span><span class="n">low</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_group_intervals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">group_intervals</span><span class="p">(</span><span class="n">profile</span><span class="p">,</span> <span class="n">tables</span><span class="p">[</span><span class="s2">"ratings"</span><span class="p">])</span>
+        <span class="n">enters</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"US status"</span><span class="p">)</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">helper</span><span class="o">.</span><span class="n">US_LABELS</span><span class="p">[</span><span class="s2">"enters"</span><span class="p">]]</span>
+        <span class="c1"># W1's two ratings, 4 and 5: mean 4.5, sd 0.707, n 2</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">enters</span><span class="p">[</span><span class="s2">"mean stars"</span><span class="p">],</span> <span class="s2">"4.500 [3.520, 5.480]"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">enters</span><span class="p">[</span><span class="s2">"</span><span class="si">% s</span><span class="s2">helved"</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"100.00"</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_sensitivity_to_choices</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">sensitivity_to_choices</span><span class="p">(</span>
+            <span class="n">profile</span><span class="p">,</span> <span class="n">deaths</span><span class="p">[</span><span class="s2">"author_deaths"</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"variant"</span><span class="p">)</span>
+        <span class="n">used</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"min(work record, earliest edition) [used]"</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">((</span><span class="n">used</span><span class="p">[</span><span class="s2">"us_pd"</span><span class="p">],</span> <span class="n">used</span><span class="p">[</span><span class="s2">"ph_pd"</span><span class="p">],</span> <span class="n">used</span><span class="p">[</span><span class="s2">"watchlist"</span><span class="p">]),</span>
+                         <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="c1"># W6 has no edition, so dating by editions only leaves W3 free</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"earliest edition only"</span><span class="p">,</span> <span class="s2">"us_pd"</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="c1"># without Wikidata, A4's death year is missing, so W4 is unknown</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"Open Library only"</span><span class="p">,</span> <span class="s2">"ph_pd"</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"later of the two (cautious)"</span><span class="p">,</span> <span class="s2">"ph_pd"</span><span class="p">],</span>
+                         <span class="mi">2</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_fiction_split</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">table</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">fiction_split</span><span class="p">(</span><span class="n">profile</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s2">"group"</span><span class="p">)</span>
+        <span class="n">row</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="s2">"enters 2027, high demand"</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">((</span><span class="n">row</span><span class="p">[</span><span class="s2">"works"</span><span class="p">],</span> <span class="n">row</span><span class="p">[</span><span class="s2">"pct_fiction"</span><span class="p">]),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mf">100.0</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_translation_gaps_exclude_filipino_editions</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># W1 and W3 have Tagalog/Filipino editions, so neither is a gap</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">helper</span><span class="o">.</span><span class="n">translation_gaps</span><span class="p">(</span><span class="n">profile</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">min_languages</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                                         <span class="n">top_n</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+                                         <span class="n">authors</span><span class="o">=</span><span class="n">tables</span><span class="p">[</span><span class="s2">"authors"</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"count"</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">test_new_charts_draw</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">fig</span> <span class="ow">in</span> <span class="p">[</span>
+            <span class="n">helper</span><span class="o">.</span><span class="n">plot_demand_concentration</span><span class="p">(</span>
+                <span class="n">helper</span><span class="o">.</span><span class="n">demand_concentration</span><span class="p">(</span><span class="n">profile</span><span class="p">)),</span>
+            <span class="n">helper</span><span class="o">.</span><span class="n">plot_demand_by_decade</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">demand_by_decade</span><span class="p">(</span><span class="n">profile</span><span class="p">)),</span>
+            <span class="n">helper</span><span class="o">.</span><span class="n">plot_persistence</span><span class="p">(</span><span class="n">helper</span><span class="o">.</span><span class="n">demand_persistence</span><span class="p">(</span>
+                <span class="n">tables</span><span class="p">[</span><span class="s2">"reading_log"</span><span class="p">],</span> <span class="n">cutoff</span><span class="o">=</span><span class="n">date</span><span class="p">(</span><span class="mi">2025</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">31</span><span class="p">))),</span>
+        <span class="p">]:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">fig</span><span class="o">.</span><span class="n">axes</span><span class="p">)</span>
+            <span class="n">plt</span><span class="o">.</span><span class="n">close</span><span class="p">(</span><span class="n">fig</span><span class="p">)</span>
 </pre></div>
 </div>
 </div>
@@ -8756,14 +8878,15 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-Collapser jp-InputCollapser jp-Cell-inputCollapser">
 </div>
 <div class="jp-InputArea jp-Cell-inputArea">
-<div class="jp-InputPrompt jp-InputArea-prompt">In [9]:</div>
+<div class="jp-InputPrompt jp-InputArea-prompt">In [10]:</div>
 <div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor" data-type="inline">
 <div class="cm-editor cm-s-jupyter">
 <div class="highlight hl-ipython3"><pre><span></span><span class="n">suite</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">TestSuite</span><span class="p">()</span>
 <span class="n">loader</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">defaultTestLoader</span>
 <span class="k">for</span> <span class="n">case</span> <span class="ow">in</span> <span class="p">[</span><span class="n">TestYearParsing</span><span class="p">,</span> <span class="n">TestPublisherNames</span><span class="p">,</span> <span class="n">TestCopyrightRules</span><span class="p">,</span>
              <span class="n">TestSparkTwins</span><span class="p">,</span> <span class="n">TestParsing</span><span class="p">,</span> <span class="n">TestAuthorDeaths</span><span class="p">,</span> <span class="n">TestStatus</span><span class="p">,</span>
-             <span class="n">TestDemandAndSupply</span><span class="p">,</span> <span class="n">TestWatchlist</span><span class="p">,</span> <span class="n">TestAuditAndRegimes</span><span class="p">,</span> <span class="n">TestDumpDiscovery</span><span class="p">,</span> <span class="n">TestStyle</span><span class="p">]:</span>
+             <span class="n">TestDemandAndSupply</span><span class="p">,</span> <span class="n">TestWatchlist</span><span class="p">,</span> <span class="n">TestAuditAndRegimes</span><span class="p">,</span> <span class="n">TestDumpDiscovery</span><span class="p">,</span>
+             <span class="n">TestAnalyticalChecks</span><span class="p">,</span> <span class="n">TestStyle</span><span class="p">]:</span>
     <span class="n">suite</span><span class="o">.</span><span class="n">addTests</span><span class="p">(</span><span class="n">loader</span><span class="o">.</span><span class="n">loadTestsFromTestCase</span><span class="p">(</span><span class="n">case</span><span class="p">))</span>
 <span class="c1"># write the per-test log to stdout so it is kept with the notebook</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">unittest</span><span class="o">.</span><span class="n">TextTestRunner</span><span class="p">(</span><span class="n">stream</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">,</span> <span class="n">verbosity</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">suite</span><span class="p">)</span>
@@ -9361,7 +9484,13 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputArea-child">
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
-<pre>ok
+<pre>ok</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>
 </pre>
 </div>
 </div>
@@ -9446,6 +9575,149 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputArea-child">
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_correlation_skips_small_groups (__main__.TestAnalyticalChecks.test_correlation_skips_small_groups) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_demand_by_decade (__main__.TestAnalyticalChecks.test_demand_by_decade) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_demand_concentration (__main__.TestAnalyticalChecks.test_demand_concentration) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_fiction_split (__main__.TestAnalyticalChecks.test_fiction_split) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_group_intervals (__main__.TestAnalyticalChecks.test_group_intervals) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_new_charts_draw (__main__.TestAnalyticalChecks.test_new_charts_draw) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_parsing_rule_examples_match_rules (__main__.TestAnalyticalChecks.test_parsing_rule_examples_match_rules) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_persistence_hold_out (__main__.TestAnalyticalChecks.test_persistence_hold_out) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_sensitivity_to_choices (__main__.TestAnalyticalChecks.test_sensitivity_to_choices) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_translation_gaps_exclude_filipino_editions (__main__.TestAnalyticalChecks.test_translation_gaps_exclude_filipino_editions) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>test_wilson_interval (__main__.TestAnalyticalChecks.test_wilson_interval) ... </pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
+<pre>ok
+</pre>
+</div>
+</div>
+<div class="jp-OutputArea-child">
+<div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
+<div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>test_pep8 (__main__.TestStyle.test_pep8) ... </pre>
 </div>
 </div>
@@ -9467,7 +9739,7 @@ so the module stays easy to read for the peer reviewers.</p>
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>----------------------------------------------------------------------
-Ran 52 tests in 12.944s
+Ran 63 tests in 15.982s
 
 OK
 </pre>
@@ -9477,7 +9749,7 @@ OK
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
 <pre>
-52 of 52 tests passed
+63 of 63 tests passed
 </pre>
 </div>
 </div>

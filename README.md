@@ -16,7 +16,7 @@ advice.
 |---|---|
 | `FINAL REPORT.ipynb` / `FINAL REPORT.html` | Technical report; runs top to bottom and regenerates every table and chart |
 | `helper_code.py` | All processing, analysis and plotting functions (PySpark), with docstrings |
-| `TEST.ipynb` / `TEST.html` | 52 unit and end-to-end tests on hand-made miniature dumps |
+| `TEST.ipynb` / `TEST.html` | 63 unit and end-to-end tests on hand-made miniature dumps |
 | `images/` | Spark UI screenshots (ingestion and analysis runs) |
 
 ## Running on Jojie (the course JupyterHub)
