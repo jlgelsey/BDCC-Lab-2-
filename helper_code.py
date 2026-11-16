@@ -14,23 +14,24 @@ or write any file.
 Pipeline at a glance
 --------------------
 Part 1  Spark session, dump discovery and file inventory
-Part 2  Parse the six monthly dumps and save cleaned Parquet tables
+Part 2  Parse the dumps and save cleaned Parquet tables; merged keys
 Part 3  Data-quality profile (coverage of the fields the analysis needs)
-Part 4  Reconcile author death years (Open Library text vs Wikidata)
+Part 4  Author death years (Open Library text; Wikidata when available)
 Part 5  Estimate copyright status per work (US, Philippines, life+70)
 Part 6  Demand: reading-log shelves, ratings and Want-to-Read trends
 Part 7  Supply: editions, recent editions, publishers, scans, Filipino
-Part 8  2027 watchlist and potentially-public-domain list
+Part 8  Duplicate titles, 2027 watchlist and public-domain list
 Part 9  Validation: independent recounts of the published numbers
 Part 10 Charts
 
 Example
 -------
 >>> spark = create_spark()
->>> dumps = discover_dumps(resolve_data_dir())
+>>> dumps = discover_dumps(resolve_data_dir())   # Jojie, 20221007 snapshot
 >>> paths = build_parquet_tables(spark, dumps, resolve_parquet_dir())
 >>> tables = load_tables(spark, paths)
->>> deaths = reconcile_author_deaths(tables["authors"], tables["wikidata"])
+>>> deaths = reconcile_author_deaths(tables["authors"],
+...                                  tables.get("wikidata"))
 >>> status = estimate_copyright_status(tables["works"], tables["editions"],
 ...                                    deaths["author_deaths"])
 
@@ -41,8 +42,11 @@ They are not legal advice and must be checked against primary records
 
 from datetime import date
 from pathlib import Path
+import getpass
+import json
 import os
 import re
+import tempfile
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -57,12 +61,23 @@ SEED = 42
 REFERENCE_DATE = date(2027, 1, 1)
 REFERENCE_YEAR = REFERENCE_DATE.year
 
-# The dump we analysed is dated 31 Oct 2026, so later years are impossible.
-MAX_VALID_YEAR = 2026
+# Where the data lives on Jojie, the course's JupyterHub server. The shared
+# folder holds one sub-folder per snapshot; only 20221007 contains the
+# separate works, editions, authors, reading-log and ratings dumps (the
+# other snapshots hold only the full revision history, ol_cdump), so it is
+# the snapshot this analysis uses.
+DATA_ROOT = "/mnt/data/public/openlibrary"
+DATA_SNAPSHOT = "20221007"
+
+# The snapshot is Open Library's dump of 30 September 2022 (its newest
+# reading-log and rating entries are dated that day; the copy on Jojie was
+# made on 7 October 2022). Later years in a record are impossible.
+DUMP_DATE = date(2022, 9, 30)
+MAX_VALID_YEAR = DUMP_DATE.year
 MIN_VALID_YEAR = 1450  # printing with movable type in Europe
 
 # "Recent" supply window: the ten calendar years ending with the dump year.
-RECENT_FROM_YEAR = 2017
+RECENT_FROM_YEAR = MAX_VALID_YEAR - 9
 
 # Filipino-language codes used by Open Library (MARC language codes).
 FILIPINO_LANGUAGE_KEYS = ("/languages/tgl", "/languages/fil")
@@ -70,24 +85,11 @@ FILIPINO_LANGUAGE_KEYS = ("/languages/tgl", "/languages/fil")
 # Wikidata items that matter here.
 WIKIDATA_PHILIPPINES = "Q928"
 
-# Dumps the proposal lists. Covers, lists and revision history are excluded.
-DUMP_NAMES = ("works", "editions", "authors", "wikidata", "reading-log",
-              "ratings")
-
-DATA_DIR_CANDIDATES = (
-    "/mnt/data/public/openlibrary",
-    "/mnt/data/public/open-library",
-    "/mnt/data/public/open_library",
-    "data",
-)
-# Shared data root on Jojie, the course's JupyterHub server. If none of the
-# folders above holds the dumps, every folder up to two levels below this
-# root is searched as well.
-SHARED_DATA_ROOT = "/mnt/data/public"
-
-# The dump whose numbers the report's narrative quotes. Running on another
-# month's dump works, but the text would then need updating.
-REPORT_DUMP_DATE = "2026-10-31"
+# Dumps the analysis needs. Covers, lists and revision history are excluded.
+DUMP_NAMES = ("works", "editions", "authors", "reading-log", "ratings")
+# Used when present, skipped otherwise. The Jojie snapshot has no Wikidata
+# dump, so death years then come from Open Library's own records only.
+OPTIONAL_DUMP_NAMES = ("wikidata",)
 
 DUMP_FILE_REGEX = (r"^ol_dump_{name}_(\d{{4}}-\d{{2}}-\d{{2}}|latest)"
                    r"\.txt(\.gz)?$")
@@ -152,48 +154,28 @@ def create_spark(app_name="ol-pd-radar", driver_memory=None,
     return spark
 
 
-def _has_dumps(path):
-    """True if a folder directly contains Open Library dump files."""
-    path = Path(path)
-    try:
-        return path.is_dir() and any(path.glob("ol_dump_*.txt*"))
-    except OSError:          # unreadable folder on a shared server
-        return False
+def resolve_data_dir(custom_dir=None, root=DATA_ROOT,
+                     snapshot=DATA_SNAPSHOT):
+    """Return the folder that holds the Open Library dumps.
 
-
-def resolve_data_dir(custom_dir=None, shared_root=SHARED_DATA_ROOT):
-    """Find the folder that holds the ol_dump_* files.
-
-    The search order is: an explicit argument, the OL_DATA_DIR environment
-    variable, the folders in DATA_DIR_CANDIDATES, and finally every folder
-    up to two levels below `shared_root` (the class data root on Jojie).
-    An explicit folder that does not exist raises an error instead of
-    silently falling back to another one.
+    By default this is the fixed Jojie location DATA_ROOT/DATA_SNAPSHOT
+    (/mnt/data/public/openlibrary/20221007); no other folder is searched,
+    so every run reads exactly the same data. `custom_dir` overrides it
+    (the tests use this with hand-made miniature dumps). The folder must
+    exist; it is not checked for individual files here, because
+    discover_dumps does that and reports which dump is missing.
 
     Returns
     -------
     Path
     """
-    if custom_dir:
-        path = Path(custom_dir)
-        if not path.is_dir():
-            raise FileNotFoundError(f"Data folder not found: {path}")
-        return path
-    env_dir = os.environ.get("OL_DATA_DIR")
-    candidates = ([env_dir] if env_dir else []) + list(DATA_DIR_CANDIDATES)
-    for candidate in candidates:
-        if _has_dumps(candidate):
-            return Path(candidate)
-    root = Path(shared_root)
-    if root.is_dir():
-        for pattern in ("*", "*/*"):
-            for folder in sorted(root.glob(pattern)):
-                if _has_dumps(folder):
-                    return folder
-    raise FileNotFoundError(
-        "No Open Library dumps (ol_dump_*.txt.gz) found. Set OL_DATA_DIR "
-        "to the folder that holds them, or place them in ./data"
-    )
+    path = Path(custom_dir) if custom_dir else Path(root) / snapshot
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"Open Library data folder not found: {path}. On Jojie the "
+            f"dumps are in {DATA_ROOT}/{DATA_SNAPSHOT}."
+        )
+    return path
 
 
 def resolve_parquet_dir(custom_dir=None):
@@ -206,7 +188,8 @@ def resolve_parquet_dir(custom_dir=None):
     return path
 
 
-def discover_dumps(data_dir, names=DUMP_NAMES, required=True):
+def discover_dumps(data_dir, names=DUMP_NAMES + OPTIONAL_DUMP_NAMES,
+                   required=True, optional=OPTIONAL_DUMP_NAMES):
     """Pick the newest dump file for each requested dump type.
 
     File names follow ol_dump_<name>_<YYYY-MM-DD>.txt.gz; the ISO date sorts
@@ -222,6 +205,8 @@ def discover_dumps(data_dir, names=DUMP_NAMES, required=True):
         If True, a missing dump raises FileNotFoundError. If False it is
         simply left out; build_parquet_tables then only complains when the
         table has not already been saved as Parquet.
+    optional : iterable of str
+        Dumps that are never required (Wikidata): left out when absent.
 
     Returns
     -------
@@ -240,7 +225,7 @@ def discover_dumps(data_dir, names=DUMP_NAMES, required=True):
                                     p.name.endswith(".gz")))
         if matches:
             found[name] = matches[-1]
-        elif required:
+        elif required and name not in optional:
             raise FileNotFoundError(f"No {name} dump in {data_dir}")
     return found
 
@@ -253,7 +238,8 @@ def _folder_size(path):
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
-def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
+def dump_inventory(dumps, parquet_dir=None,
+                   names=DUMP_NAMES + OPTIONAL_DUMP_NAMES):
     """Tabulate each dump: file, date, compressed size and Parquet status.
 
     No dump is read; only file names and sizes are inspected. A raw dump
@@ -269,12 +255,10 @@ def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
     rows = []
     for name in names:
         path = dumps.get(name)
-        match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name) if path \
-            else None
         row = {
             "dump": name,
             "file": path.name if path else "(not present)",
-            "dump_date": match.group(1) if match else None,
+            "dump_date": dump_date_of(path) if path else None,
             "raw_gb": round(path.stat().st_size / 1e9, 3) if path else None,
         }
         if parquet_dir is not None:
@@ -285,18 +269,34 @@ def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
     return pd.DataFrame(rows)
 
 
-def check_dump_date(dumps, expected=REPORT_DUMP_DATE):
+def dump_date_of(path):
+    """Date label of one dump file (ISO text) or None.
+
+    A dated file name (ol_dump_works_2022-09-30.txt.gz) gives its own
+    date. A file named ..._latest sits in a snapshot folder such as
+    20221007; if that folder is DATA_SNAPSHOT, DUMP_DATE is returned,
+    otherwise the folder's own date.
+    """
+    path = Path(path)
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
+    if match:
+        return match.group(1)
+    folder = path.parent.name
+    if folder == DATA_SNAPSHOT:
+        return DUMP_DATE.isoformat()
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", folder)
+    return "-".join(match.groups()) if match else None
+
+
+def check_dump_date(dumps, expected=DUMP_DATE.isoformat()):
     """Compare the dumps' dates with the date the report's text describes.
 
-    Returns a short message: confirmation when every dated dump matches
+    Returns a short message: confirmation when every dump matches
     `expected`, otherwise a warning naming the dates found, since the
     numbers quoted in the narrative come from the `expected` dump.
     """
-    dates = sorted({
-        match.group(1) for path in dumps.values()
-        for match in [re.search(r"(\d{4}-\d{2}-\d{2}|latest)", path.name)]
-        if match
-    })
+    dates = sorted({dump_date_of(path) or "unknown"
+                    for path in dumps.values()})
     if dates == [expected]:
         return f"All dumps are dated {expected}, as described in the text."
     return (
@@ -515,6 +515,7 @@ def wikidata_schema():
     from pyspark.sql import types as T
 
     def statements(content_type):
+        """Schema of a list of Wikidata statements of one type."""
         return T.ArrayType(T.StructType([
             T.StructField("rank", T.StringType()),
             T.StructField("value", T.StructType([
@@ -653,6 +654,7 @@ def wikidata_years(statements, min_precision=9):
     )
 
     def to_year(s):
+        """Year of one statement's time value (null if too imprecise)."""
         time_text = s["value"]["content"]["time"]
         sign = F.regexp_extract(time_text, r"^([+-])", 1)
         digits = F.regexp_extract(time_text, r"^[+-]0*([0-9]+)-", 1)
@@ -686,6 +688,7 @@ def parse_wikidata(spark, path):
     )
 
     def not_deprecated(s):
+        """True for a statement Wikidata does not mark deprecated."""
         return F.coalesce(s["rank"], F.lit("normal")) != "deprecated"
 
     ol_ids = F.filter(
@@ -781,29 +784,49 @@ PARSERS = {
 
 
 def build_parquet_tables(spark, dumps, parquet_dir, overwrite=False,
-                         parallel=True):
+                         parallel=True, staging_dir=None, progress=True,
+                         keep_staged=False):
     """Parse each dump once and save it as Parquet.
 
     A table whose folder already contains a _SUCCESS marker is reused, so a
     second "Run All" of the report takes minutes rather than hours. Pass
     overwrite=True after downloading a newer dump.
 
-    Because each .gz file is read by a single Spark task, parsing the dumps
-    one after another would leave most CPU cores idle. With parallel=True
-    the dumps are submitted as concurrent Spark jobs from separate Python
-    threads, so the total time is roughly that of the largest dump.
+    Ingestion has two steps. stage_dumps first decompresses every .gz
+    dump to plain text in `staging_dir` (default: the OL_STAGING_DIR
+    environment variable, else a folder in the system temp directory;
+    about 58 GB for the 2022 dumps), printing a progress bar. Spark then
+    parses the plain text, which it can split across all cores, and the
+    staged copies are deleted afterwards unless keep_staged=True. With
+    parallel=True the dumps are parsed as concurrent Spark jobs. The raw
+    line count of each dump is saved next to the tables for
+    ingestion_check.
+
+    Optional dumps (Wikidata) are built only when their raw file is in
+    `dumps` or their table already exists; otherwise they are left out.
 
     Returns
     -------
     dict
         {name: Path to the Parquet folder}
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     parquet_dir = Path(parquet_dir)
-    out = {name: parquet_dir / name.replace("-", "_") for name in DUMP_NAMES}
+
+    def folder(name):
+        """Parquet folder of one dump (hyphens become underscores)."""
+        return parquet_dir / name.replace("-", "_")
+
+    check_manifest(parquet_dir, dumps)
+    # An optional table is kept only if its dump is present, or if it
+    # exists already and no rebuild was requested.
+    names = list(DUMP_NAMES) + [
+        name for name in OPTIONAL_DUMP_NAMES
+        if name in dumps
+        or (not overwrite and (folder(name) / "_SUCCESS").is_file())
+    ]
+    out = {name: folder(name) for name in names}
     todo = [
-        name for name in DUMP_NAMES
+        name for name in names
         if overwrite or not (out[name] / "_SUCCESS").is_file()
     ]
     missing = [name for name in todo if name not in dumps]
@@ -812,24 +835,620 @@ def build_parquet_tables(spark, dumps, parquet_dir, overwrite=False,
             f"No Parquet table and no raw dump for: {missing}"
         )
 
+    if not todo:
+        return out
+    # Two runs writing the same folders delete each other's files (a
+    # first attempt lost 30 million rows this way), so only one may run.
+    lock = parquet_dir / ".ingestion.lock"
+    acquire_lock(lock)
+    try:
+        return _build(spark, dumps, todo, out, parquet_dir, parallel,
+                      staging_dir, progress, keep_staged)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+MANIFEST = "manifest.json"
+
+
+def check_manifest(parquet_dir, dumps):
+    """Refuse to reuse Parquet tables built from other data or rules.
+
+    Every cached table (including author_deaths, work_status and
+    work_profile, which materialize reuses) depends on the snapshot and on
+    the date constants. They are recorded in manifest.json the first time
+    the folder is used; a later run with a different snapshot or
+    constants raises an error instead of silently mixing results.
+    """
+    parquet_dir = Path(parquet_dir)
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    folders = sorted({str(Path(p).parent) for p in dumps.values()})
+    current = {"data_folders": folders, "dump_date": DUMP_DATE.isoformat(),
+               "recent_from_year": RECENT_FROM_YEAR,
+               "max_valid_year": MAX_VALID_YEAR,
+               "reference_date": REFERENCE_DATE.isoformat()}
+    path = parquet_dir / MANIFEST
+    if path.is_file():
+        saved = json.loads(path.read_text())
+        if not folders:
+            # reusing tables without raw dumps: only the rules can differ
+            current["data_folders"] = saved.get("data_folders")
+        if saved != current:
+            raise RuntimeError(
+                f"{parquet_dir} was built from {saved}, but this run uses "
+                f"{current}. Delete the folder (or set OL_PARQUET_DIR to "
+                "a new one) so every table is rebuilt from the same data."
+            )
+    else:
+        path.write_text(json.dumps(current, indent=1))
+    return current
+
+
+def acquire_lock(lock):
+    """Create a lock file holding this process's host and PID.
+
+    A lock left behind by a process that no longer runs on this host
+    (for example a killed kernel) is taken over; a live one raises.
+    """
+    import socket
+
+    lock = Path(lock)
+    me = f"{socket.gethostname()} {os.getpid()}"
+    if lock.is_file():
+        host, _, pid = lock.read_text().partition(" ")
+        alive = False
+        if host == socket.gethostname() and pid.strip().isdigit():
+            try:
+                os.kill(int(pid), 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+        if alive:
+            raise RuntimeError(
+                f"Another run (PID {pid.strip()}) is writing to "
+                f"{lock.parent}. Wait for it to finish.")
+    lock.write_text(me)
+
+
+def _build(spark, dumps, todo, out, parquet_dir, parallel, staging_dir,
+           progress, keep_staged):
+    """Body of build_parquet_tables, run while holding the lock."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    # one staging folder per Parquet folder, so separate runs never share
+    tag = hashlib.md5(str(parquet_dir.resolve()).encode()).hexdigest()[:8]
+    staging_dir = Path(staging_dir or os.environ.get(
+        "OL_STAGING_DIR",
+        Path(tempfile.gettempdir()) / f"ol_staging_{getpass.getuser()}"
+        / tag))
+
+    # Step 1: decompress every .gz dump to plain text, all at once.
+    staged = stage_dumps({name: dumps[name] for name in todo}, staging_dir,
+                         progress=progress)
+    counts_file = parquet_dir / RAW_LINE_COUNTS
+    counts = (json.loads(counts_file.read_text())
+              if counts_file.is_file() else {})
+
     def write(name):
-        table = PARSERS[name](spark, dumps[name])
+        """Parse one input and write it as Parquet."""
+        text_path, n_lines = staged[name]
+        table = PARSERS[name](spark, text_path)
         # Split the output into files of at most 2 million rows without a
         # shuffle; a shuffle would copy the whole table to disk again.
         (table.write.mode("overwrite")
          .option("maxRecordsPerFile", 2_000_000)
          .parquet(str(out[name])))
+        counts[name] = n_lines
         return name
 
-    # Largest dumps first, so they start as early as possible.
-    todo.sort(key=lambda n: -Path(dumps[n]).stat().st_size)
-    if parallel and len(todo) > 1:
+    # Step 2: parse the plain text with Spark. Plain text is splittable,
+    # so each dump is read by many tasks in parallel.
+    todo.sort(key=lambda n: -staged[n][0].stat().st_size)
+    try:
+        if parallel and len(todo) > 1:
+            with ThreadPoolExecutor(max_workers=len(todo)) as pool:
+                list(pool.map(write, todo))
+        else:
+            for name in todo:
+                write(name)
+    finally:
+        counts_file.parent.mkdir(parents=True, exist_ok=True)
+        counts_file.write_text(json.dumps(counts, indent=1))
+        if not keep_staged:
+            for name in todo:
+                text_path = staged[name][0]
+                if text_path != Path(dumps[name]):
+                    text_path.unlink(missing_ok=True)
+    return out
+
+
+# File in the Parquet folder that records how many lines each raw dump had.
+RAW_LINE_COUNTS = "raw_line_counts.json"
+
+
+def stage_dumps(dumps, staging_dir, progress=True, every=30):
+    """Decompress .gz dumps to plain text in parallel, with progress.
+
+    Why this step exists: a gzip file cannot be split, so Spark reads a
+    .gz dump with ONE task however many cores the machine has; the 8 GB
+    editions dump alone kept one core busy for over half an hour. The
+    plain-text copy can be split into 128 MB blocks, so Spark parses it
+    with every core. Counting lines here, with a decompressor independent
+    of Spark's, also gives an exact reference for ingestion_check.
+
+    Each decompression runs in its own thread (zlib releases the GIL).
+    Every `every` seconds a progress line reports the share of compressed
+    bytes read per dump and an estimated time to finish. Lines are
+    counted while writing, so the Parquet tables can later be checked
+    against the raw files (see ingestion_check).
+
+    Returns
+    -------
+    dict
+        {name: (Path of the plain-text file, number of lines)}.
+        Uncompressed inputs are used in place.
+    """
+    import gzip
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    staging_dir = Path(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    total = {n: Path(p).stat().st_size for n, p in dumps.items()}
+    done_bytes = {n: 0 for n in dumps}
+    finished = threading.Event()
+    start = time.time()
+
+    def stage(name):
+        """Decompress one dump (or count lines of a plain file)."""
+        source = Path(dumps[name])
+        if source.suffix != ".gz":
+            with open(source, "rb") as handle:
+                lines = sum(chunk.count(b"\n") for chunk in
+                            iter(lambda: handle.read(1 << 24), b""))
+            done_bytes[name] = total[name]
+            return name, (source, lines)
+        target = staging_dir / source.name[:-3]
+        lines = 0
+        with open(source, "rb") as raw, \
+                gzip.GzipFile(fileobj=raw) as unzipped, \
+                open(target, "wb") as out:
+            for chunk in iter(lambda: unzipped.read(1 << 24), b""):
+                out.write(chunk)
+                lines += chunk.count(b"\n")
+                done_bytes[name] = raw.tell()
+        done_bytes[name] = total[name]
+        return name, (target, lines)
+
+    def report():
+        """Print a progress line every `every` seconds until done."""
+        while not finished.wait(every):
+            share = sum(done_bytes.values()) / max(sum(total.values()), 1)
+            elapsed = time.time() - start
+            eta = elapsed / share - elapsed if share > 0 else float("nan")
+            parts = ", ".join(
+                f"{n} {100 * done_bytes[n] / max(total[n], 1):.0f}%"
+                for n in dumps)
+            bar = "#" * int(30 * share) + "-" * (30 - int(30 * share))
+            print(f"[{bar}] {100 * share:5.1f}%  {parts}  "
+                  f"elapsed {elapsed / 60:.1f} min, about "
+                  f"{eta / 60:.1f} min left", flush=True)
+
+    reporter = threading.Thread(target=report, daemon=True)
+    if progress:
+        reporter.start()
+    try:
+        with ThreadPoolExecutor(max_workers=max(len(dumps), 1)) as pool:
+            staged = dict(pool.map(stage, list(dumps)))
+    except BaseException:
+        # do not leave tens of GB of partial files in a shared /tmp
+        for name, source in dumps.items():
+            if Path(source).suffix == ".gz":
+                (staging_dir / Path(source).name[:-3]).unlink(
+                    missing_ok=True)
+        raise
+    finally:
+        finished.set()
+    if progress:
+        print(f"Decompressed {len(dumps)} dumps in "
+              f"{(time.time() - start) / 60:.1f} min", flush=True)
+    return staged
+
+
+def ingestion_check(tables, parquet_dir):
+    """Compare each Parquet table's rows with its raw dump's line count.
+
+    Works, editions and authors keep every line of their dump (one record
+    per line, all of the dump's own type). Reading-log and ratings drop
+    rows by design (custom shelves, missing work keys), so for them the
+    kept share is reported, not tested.
+
+    Returns
+    -------
+    DataFrame
+        table, raw_lines, parquet_rows, kept_pct, complete.
+    """
+    counts_file = Path(parquet_dir) / RAW_LINE_COUNTS
+    counts = (json.loads(counts_file.read_text())
+              if counts_file.is_file() else {})
+    rows = []
+    for name, raw_lines in counts.items():
+        key = name.replace("-", "_")
+        if key not in tables:
+            continue
+        kept = tables[key].count()
+        rows.append({
+            "table": key, "raw_lines": raw_lines, "parquet_rows": kept,
+            "kept_pct": round(100 * kept / raw_lines, 3) if raw_lines
+            else np.nan,
+            "complete": (kept == raw_lines) if key in
+            ("works", "editions", "authors") else None,
+        })
+    return pd.DataFrame(rows)
+
+
+# The other two files of the snapshot. They are read once each, straight
+# from gzip (staging them would need about 200 GB of scratch disk), and
+# reduced to compact Parquet tables.
+HISTORY_FILES = {
+    # latest version of EVERY record type (works, editions and authors,
+    # but also redirects, deletions, lists, subjects, ...)
+    "full_dump": "ol_dump_latest.txt.gz",
+    # the same file again, keeping only the merged-key redirects
+    "redirects": "ol_dump_latest.txt.gz",
+    # every revision of every record since the catalogue began
+    "revisions": "ol_cdump_latest.txt.gz",
+}
+
+
+def parse_full_dump(spark, path):
+    """Record-type census of the all-types dump.
+
+    Only the first two columns are read: the record type and the key's
+    namespace (/works, /books, /authors, ...). A redirect or deletion
+    keeps the namespace of the record it replaced, so the census shows
+    how many works, editions and authors were merged or removed.
+
+    Returns
+    -------
+    DataFrame
+        record_type, key_prefix, records.
+    """
+    from pyspark.sql import functions as F
+
+    parts = F.split(F.col("value"), "\t", 3)
+    return (
+        spark.read.text(str(path))
+        .select(parts.getItem(0).alias("record_type"),
+                F.regexp_extract(parts.getItem(1), r"^(/[a-z0-9_]+)/", 1)
+                .alias("key_prefix"))
+        .groupBy("record_type", "key_prefix")
+        .agg(F.count(F.lit(1)).alias("records"))
+    )
+
+
+def parse_revisions(spark, path):
+    """One row per revision in the complete (all-revisions) dump.
+
+    Every revision keeps its record type, revision number and the date it
+    was saved. Author revisions additionally keep the key and the
+    free-text birth and death dates, parsed with the same rule as the
+    authors table, so the history of each author's death year can be
+    traced. Keys of other types are dropped to keep the table small.
+
+    Returns
+    -------
+    DataFrame
+        record_type, key (authors only), revision, modified (date),
+        name, death_date, ol_death_year, ol_birth_year (authors only).
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql import types as T
+
+    schema = T.StructType([
+        T.StructField("name", T.StringType()),
+        T.StructField("birth_date", T.StringType()),
+        T.StructField("death_date", T.StringType()),
+    ])
+    parts = F.split(F.col("value"), "\t", 5)
+    record_type = parts.getItem(0)
+    is_author = record_type == "/type/author"
+    df = spark.read.text(str(path)).select(
+        record_type.alias("record_type"),
+        F.when(is_author, parts.getItem(1)).alias("key"),
+        parts.getItem(2).cast("int").alias("revision"),
+        F.to_date(F.substring(parts.getItem(3), 1, 10)).alias("modified"),
+        F.when(is_author, F.from_json(parts.getItem(4), schema)).alias("j"),
+    )
+    return df.select(
+        "record_type", "key", "revision", "modified",
+        F.col("j.name").alias("name"),
+        F.col("j.death_date").alias("death_date"),
+        life_year_from_text(F.col("j.death_date")).alias("ol_death_year"),
+        life_year_from_text(F.col("j.birth_date")).alias("ol_birth_year"),
+    )
+
+
+def parse_redirects(spark, path):
+    """Redirect records of the all-types dump: merged key -> surviving key.
+
+    When Open Library editors merge two records, the losing key is kept as
+    a /type/redirect whose JSON "location" names the record that replaced
+    it. Reading-log and rating rows, and the author lists of works, can
+    still carry a merged key, so without this table those rows would
+    silently drop out of every join.
+
+    Returns
+    -------
+    DataFrame
+        old_key, new_key (one row per redirect, any namespace).
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql import types as T
+
+    schema = T.StructType([T.StructField("location", T.StringType())])
+    parts = F.split(F.col("value"), "\t", 5)
+    return (
+        spark.read.text(str(path))
+        .filter(F.col("value").startswith("/type/redirect\t"))
+        .select(parts.getItem(1).alias("old_key"),
+                F.from_json(parts.getItem(4), schema)
+                .getField("location").alias("new_key"))
+        .filter(F.col("new_key").isNotNull())
+    )
+
+
+def resolve_redirect_chains(redirects, max_hops=5):
+    """Follow redirect chains (A -> B -> C) to their final target.
+
+    A record can be merged more than once, so a redirect may point to
+    another redirect. Each pass replaces a target that is itself a
+    redirect with that redirect's target; `max_hops` passes resolve chains
+    of up to max_hops + 1 links. A key that still points to a redirect
+    afterwards (a loop) is dropped, as is a redirect to itself.
+
+    Returns
+    -------
+    DataFrame
+        old_key, new_key, where new_key is never itself an old_key.
+    """
+    from pyspark.sql import functions as F
+
+    resolved = redirects.select("old_key", "new_key")
+    step = redirects.select(F.col("old_key").alias("new_key"),
+                            F.col("new_key").alias("next_key"))
+    for _ in range(max_hops):
+        resolved = (
+            resolved.join(step, "new_key", "left")
+            .select("old_key",
+                    F.coalesce("next_key", "new_key").alias("new_key"))
+        )
+    return (
+        resolved.join(step.select(F.col("new_key").alias("old_again")),
+                      F.col("new_key") == F.col("old_again"), "left_anti")
+        .filter(F.col("old_key") != F.col("new_key"))
+        .dropDuplicates(["old_key"])
+    )
+
+
+def apply_redirects(df, column, redirects):
+    """Replace merged keys in `column` by the key that replaced them.
+
+    `redirects` must already be resolved (resolve_redirect_chains). Rows
+    whose key was never merged are returned unchanged; the table is small
+    (under a million rows), so it is broadcast to every task instead of
+    shuffling the large side of the join.
+    """
+    from pyspark.sql import functions as F
+
+    lookup = F.broadcast(redirects.select(
+        F.col("old_key").alias(column), F.col("new_key").alias("_new")))
+    return (
+        df.join(lookup, column, "left")
+        .withColumn(column, F.coalesce("_new", column))
+        .drop("_new")
+    )
+
+
+def resolve_merged_keys(tables, redirects):
+    """Point every table at the surviving record of each merged key.
+
+    Returns a copy of `tables` in which the work_key of editions,
+    reading_log and ratings, and the author_keys of works, have been
+    passed through the resolved redirects. Works whose author list holds
+    no merged key are left untouched: only the affected works are
+    exploded, so the 26-million-row works table is never shuffled.
+
+    Parameters
+    ----------
+    tables : dict of Spark DataFrames
+        Must hold works, editions, reading_log and ratings.
+    redirects : Spark DataFrame
+        old_key, new_key from resolve_redirect_chains.
+    """
+    from pyspark.sql import functions as F
+
+    out = dict(tables)
+    for name in ("editions", "reading_log", "ratings"):
+        out[name] = apply_redirects(tables[name], "work_key", redirects)
+
+    lookup = F.broadcast(redirects.select(
+        F.col("old_key").alias("author_key"), "new_key"))
+    # one small map per affected work: merged author key -> surviving key
+    fixes = (
+        tables["works"]
+        .select("work_key", F.explode("author_keys").alias("author_key"))
+        .join(lookup, "author_key")
+        .groupBy("work_key")
+        .agg(F.map_from_entries(F.collect_set(
+            F.struct("author_key", "new_key"))).alias("_fix"))
+        # small (one row per affected work) and needed by every later
+        # use of the works table, so compute it once and keep it
+        .cache()
+    )
+    out["works"] = (
+        tables["works"].join(F.broadcast(fixes), "work_key", "left")
+        .withColumn("author_keys", F.when(
+            F.col("_fix").isNull(), F.col("author_keys")
+        ).otherwise(F.array_distinct(F.transform(
+            "author_keys",
+            lambda k: F.coalesce(F.col("_fix")[k], k)))))
+        .drop("_fix")
+    )
+    return out
+
+
+def redirect_impact(raw_tables, resolved_tables):
+    """Rows that find their record before and after resolving merges.
+
+    For each link the analysis joins on, counts the rows whose key is a
+    live record in the raw tables, and again after resolve_merged_keys.
+    The difference is what a naive join would have dropped; the rest
+    (still_unmatched) point to deleted records and cannot be recovered.
+
+    Returns
+    -------
+    DataFrame
+        link, rows, matched_raw, matched_resolved, recovered,
+        recovered_pct, still_unmatched, still_unmatched_pct.
+    """
+    from pyspark.sql import functions as F
+
+    work_keys = raw_tables["works"].select("work_key")
+    author_keys = raw_tables["authors"].select("author_key")
+
+    def matched(tables, name):
+        """Rows of a fact table whose work_key is a live work."""
+        rows = tables[name].filter(F.col("work_key").isNotNull())
+        return rows.count(), rows.join(work_keys, "work_key",
+                                       "left_semi").count()
+
+    def author_links(tables):
+        """Work-author links, and those whose author record is live."""
+        links = tables["works"].select(
+            F.explode("author_keys").alias("author_key"))
+        return links.count(), links.join(author_keys, "author_key",
+                                         "left_semi").count()
+
+    rows = []
+    labels = {"reading_log": "reading-log entry -> work",
+              "ratings": "rating -> work", "editions": "edition -> work"}
+    for name, label in labels.items():
+        total, before = matched(raw_tables, name)
+        _, after = matched(resolved_tables, name)
+        rows.append((label, total, before, after, total))
+    total, before = author_links(raw_tables)
+    total_after, after = author_links(resolved_tables)
+    rows.append(("work -> author", total, before, after, total_after))
+    table = pd.DataFrame(rows, columns=["link", "rows", "matched_raw",
+                                        "matched_resolved", "_rows_after"])
+    table["recovered"] = table["matched_resolved"] - table["matched_raw"]
+    table["recovered_pct"] = (100 * table["recovered"]
+                              / table["rows"]).round(3)
+    table["still_unmatched"] = (table["_rows_after"]
+                                - table["matched_resolved"])
+    table["still_unmatched_pct"] = (100 * table["still_unmatched"]
+                                    / table["_rows_after"]).round(3)
+    return table.drop(columns="_rows_after")
+
+
+HISTORY_PARSERS = {"full_dump": parse_full_dump,
+                   "redirects": parse_redirects,
+                   "revisions": parse_revisions}
+
+
+def build_history_tables(spark, data_dir, parquet_dir, overwrite=False):
+    """Reduce the all-types dump and the revision dump to Parquet.
+
+    Each file is one gzip stream, so Spark reads it with a single task;
+    the two files are read as concurrent jobs. This is the slowest step
+    of the pipeline (about an hour for the 27.7 GB revision dump), and
+    like build_parquet_tables it runs only once: a table whose folder
+    holds a _SUCCESS marker is reused.
+
+    Returns
+    -------
+    dict
+        {"full_dump": Path, "redirects": Path, "revisions": Path}
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    data_dir, parquet_dir = Path(data_dir), Path(parquet_dir)
+    out = {name: parquet_dir / name for name in HISTORY_FILES}
+    todo = [name for name in HISTORY_FILES
+            if overwrite or not (out[name] / "_SUCCESS").is_file()]
+    if not todo:
+        return out
+    for name in todo:
+        if not (data_dir / HISTORY_FILES[name]).is_file():
+            raise FileNotFoundError(
+                f"{HISTORY_FILES[name]} not found in {data_dir}")
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    lock = parquet_dir / ".history.lock"
+    acquire_lock(lock)
+
+    def write(name):
+        """Parse one input and write it as Parquet."""
+        table = HISTORY_PARSERS[name](spark, data_dir / HISTORY_FILES[name])
+        (table.write.mode("overwrite")
+         .option("maxRecordsPerFile", 20_000_000)
+         .parquet(str(out[name])))
+
+    try:
         with ThreadPoolExecutor(max_workers=len(todo)) as pool:
             list(pool.map(write, todo))
-    else:
-        for name in todo:
-            write(name)
+    finally:
+        lock.unlink(missing_ok=True)
     return out
+
+
+def snapshot_inventory(root=DATA_ROOT, needed=DUMP_NAMES):
+    """List every Open Library snapshot folder on the server.
+
+    For each folder: the files it holds, their total size, and which of
+    the dumps this analysis needs are present. This is the evidence for
+    the choice of snapshot: only a folder with all `needed` dumps can
+    support the rights, demand and supply measures together.
+
+    Returns
+    -------
+    DataFrame
+        snapshot, files, GiB, and one True/False column per needed dump.
+    """
+    rows = []
+    for folder in sorted(Path(root).iterdir()):
+        if not folder.is_dir():
+            continue
+        files = sorted(p.name for p in folder.glob("ol_*"))
+        row = {"snapshot": folder.name, "files": ", ".join(files),
+               "GiB": round(sum((folder / f).stat().st_size
+                                for f in files) / 2**30, 1)}
+        for name in needed:
+            row[name] = any(f.startswith(f"ol_dump_{name}_") for f in files)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def raw_input_size(data_dir):
+    """Size of every input file, like `du -sch` on the snapshot folder.
+
+    Returns
+    -------
+    DataFrame
+        file, GiB and GB per file plus a total row. du reports binary
+        gigabytes (GiB, 2**30 bytes), so both units are shown.
+    """
+    rows = [{"file": p.name, "bytes": p.stat().st_size}
+            for p in sorted(Path(data_dir).glob("ol_*.txt*"))]
+    table = pd.DataFrame(rows)
+    table.loc[len(table)] = {"file": "total", "bytes": table["bytes"].sum()}
+    table["GiB"] = (table["bytes"] / 2**30).round(2)
+    table["GB"] = (table["bytes"] / 1e9).round(2)
+    return table.drop(columns="bytes")
 
 
 def materialize(spark, df, path, overwrite=False):
@@ -937,6 +1556,249 @@ def profile_tables(tables):
     return pd.DataFrame(rows)
 
 
+def describe_raw_data(tables):
+    """Simple descriptive statistics for every raw dataset.
+
+    One Spark pass per table computes a handful of statistics that a
+    reader needs to picture the data: its size, its key distributions and
+    the period it covers. The all-types dump (full_dump) and the revision
+    history (revisions) are included when they are in `tables`.
+
+    Returns
+    -------
+    DataFrame
+        dataset, statistic, value (value is pre-formatted text, so counts,
+        shares and dates can share one column).
+    """
+    from pyspark.sql import functions as F
+
+    rows = []
+
+    def add(dataset, statistic, value):
+        """Append one result row."""
+        rows.append({"dataset": dataset, "statistic": statistic,
+                     "value": value})
+
+    def pct(part, whole):
+        """Format part / whole as a percentage with one decimal."""
+        return f"{100 * (part or 0) / whole:.1f}%" if whole else "-"
+
+    w = tables["works"].agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum((F.size("author_keys") > 0).cast("int")).alias("with_author"),
+        F.avg("n_subjects").alias("subjects_mean"),
+        F.sum(F.col("is_fiction").cast("int")).alias("fiction"),
+        F.min("work_year").alias("min_year"),
+        F.expr("percentile_approx(work_year, 0.5, 10000)").alias("median"),
+    ).collect()[0]
+    add("works", "records", f"{w['n']:,}")
+    add("works", "with at least one author key",
+        pct(w["with_author"], w["n"]))
+    add("works", "subjects per work (mean)", f"{w['subjects_mean']:.2f}")
+    add("works", "tagged as fiction", pct(w["fiction"], w["n"]))
+    add("works", "median own first-publish year (where given)",
+        f"{w['median']}")
+
+    e = tables["editions"]
+    per_work = e.filter(F.col("work_key").isNotNull()).groupBy(
+        "work_key").count()
+    epw = per_work.agg(
+        F.avg("count").alias("mean"),
+        F.expr("percentile_approx(count, 0.5, 10000)").alias("median"),
+        F.max("count").alias("max"),
+    ).collect()[0]
+    es = e.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.expr("percentile_approx(publish_year, 0.5, 10000)").alias(
+            "median_year"),
+        F.sum((F.col("publish_year") >= RECENT_FROM_YEAR).cast("int"))
+        .alias("recent"),
+    ).collect()[0]
+    n_publishers = (e.select(F.explode("publisher_keys").alias("p"))
+                    .agg(F.countDistinct("p")).collect()[0][0])
+    n_languages = (e.select(F.explode("language_keys").alias("l"))
+                   .agg(F.countDistinct("l")).collect()[0][0])
+    add("editions", "records", f"{es['n']:,}")
+    add("editions", "editions per linked work (mean / median / max)",
+        f"{epw['mean']:.2f} / {epw['median']} / {epw['max']:,}")
+    add("editions", "median publication year", f"{es['median_year']}")
+    add("editions", f"published {RECENT_FROM_YEAR} or later",
+        pct(es["recent"], es["n"]))
+    add("editions", "distinct normalized publishers", f"{n_publishers:,}")
+    add("editions", "distinct languages", f"{n_languages:,}")
+
+    a = tables["authors"].agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(F.col("ol_birth_year").isNotNull().cast("int")).alias("birth"),
+        F.sum(F.col("ol_death_year").isNotNull().cast("int")).alias("death"),
+        F.expr("percentile_approx(ol_death_year, 0.5, 10000)").alias(
+            "median_death"),
+    ).collect()[0]
+    add("authors", "records", f"{a['n']:,}")
+    add("authors", "with a usable birth year", pct(a["birth"], a["n"]))
+    add("authors", "with a usable death year", pct(a["death"], a["n"]))
+    add("authors", "median death year (where known)",
+        f"{a['median_death']}")
+
+    r = tables["reading_log"].agg(
+        F.count(F.lit(1)).alias("n"),
+        F.countDistinct("work_key").alias("works"),
+        F.min("logged_date").alias("first"),
+        F.max("logged_date").alias("last"),
+        F.sum((F.col("shelf") == "Want to Read").cast("int")).alias("wtr"),
+    ).collect()[0]
+    add("reading-log", "shelf entries", f"{r['n']:,}")
+    add("reading-log", "distinct works shelved", f"{r['works']:,}")
+    add("reading-log", "Want to Read share", pct(r["wtr"], r["n"]))
+    add("reading-log", "date range", f"{r['first']} to {r['last']}")
+
+    g = tables["ratings"].agg(
+        F.count(F.lit(1)).alias("n"),
+        F.countDistinct("work_key").alias("works"),
+        F.avg("rating").alias("mean"),
+        F.min("rated_date").alias("first"),
+        F.max("rated_date").alias("last"),
+    ).collect()[0]
+    add("ratings", "ratings", f"{g['n']:,}")
+    add("ratings", "distinct works rated", f"{g['works']:,}")
+    add("ratings", "mean stars (1-5)", f"{g['mean']:.2f}")
+    add("ratings", "date range", f"{g['first']} to {g['last']}")
+
+    if "full_dump" in tables:
+        fd = tables["full_dump"].groupBy("record_type").agg(
+            F.sum("records").alias("n")).toPandas()
+        total = int(fd["n"].sum())
+        add("all-types dump", "records (all types)", f"{total:,}")
+        add("all-types dump", "distinct record types", f"{len(fd):,}")
+        for kind in ["/type/redirect", "/type/delete"]:
+            n = int(fd.loc[fd["record_type"] == kind, "n"].sum())
+            add("all-types dump", f"{kind} records", pct(n, total))
+
+    if "revisions" in tables:
+        rv = tables["revisions"].agg(
+            F.count(F.lit(1)).alias("n"),
+            F.min("modified").alias("first"),
+            F.max("modified").alias("last"),
+            F.sum((F.col("revision") == 1).cast("int")).alias("created"),
+            F.sum((F.col("record_type") == "/type/author").cast("int"))
+            .alias("author_revs"),
+        ).collect()[0]
+        add("revision history", "revisions (all types)", f"{rv['n']:,}")
+        add("revision history", "revisions that created a record",
+            pct(rv["created"], rv["n"]))
+        add("revision history", "author revisions", f"{rv['author_revs']:,}")
+        add("revision history", "date range", f"{rv['first']} to "
+            f"{rv['last']}")
+    return pd.DataFrame(rows)
+
+
+def investigate_missing(tables, author_history=None):
+    """Look for the reasons behind the missing values the analysis meets.
+
+    Three gaps matter for the rights estimates. Each is broken down by a
+    variable that could explain it, so the report can say why the values
+    are missing before deciding how to treat them:
+
+    * authors without a death year, by birth period (a person born after
+      1940 is probably still alive, so the gap is genuine, not an error)
+      and, when the revision history is given, by whether the record was
+      ever edited after its creation (an unedited record was left as the
+      import created it);
+    * works without their own first_publish_date, by whether an edition
+      supplies a year instead;
+    * editions without a work link, by whether they have a publish year.
+
+    Parameters
+    ----------
+    tables : dict of Spark DataFrames
+    author_history : Spark DataFrame, optional
+        per_author from death_year_history (needs n_revisions).
+
+    Returns
+    -------
+    dict of pandas DataFrames: authors, authors_edited, works, editions.
+    """
+    from pyspark.sql import functions as F
+
+    born = F.col("ol_birth_year")
+    period = (
+        F.when(born.isNull(), "no birth year either")
+        .when(born < 1850, "born before 1850")
+        .when(born < 1900, "born 1850-1899")
+        .when(born < 1940, "born 1900-1939")
+        .otherwise("born 1940 or later (likely alive)")
+    )
+    authors = (
+        tables["authors"].groupBy(period.alias("birth period")).agg(
+            F.count(F.lit(1)).alias("authors"),
+            F.sum(F.col("ol_death_year").isNull().cast("int")).alias(
+                "without_death_year"),
+        ).toPandas()
+    )
+    authors["missing_pct"] = (100 * authors["without_death_year"]
+                              / authors["authors"]).round(1)
+    authors["share_of_all_missing_pct"] = (
+        100 * authors["without_death_year"]
+        / authors["without_death_year"].sum()).round(1)
+    authors = authors.sort_values("authors", ascending=False).reset_index(
+        drop=True)
+
+    out = {"authors": authors}
+    if author_history is not None:
+        edited = (
+            author_history.groupBy(
+                F.when(F.col("death_year").isNull(), "no death year")
+                .otherwise("has death year").alias("death year"))
+            .agg(F.count(F.lit(1)).alias("authors"),
+                 F.sum((F.col("n_revisions") == 1).cast("int")).alias(
+                     "never_edited"),
+                 F.avg("n_revisions").alias("mean_revisions"))
+            .toPandas()
+        )
+        edited["never_edited_pct"] = (100 * edited["never_edited"]
+                                      / edited["authors"]).round(1)
+        edited["mean_revisions"] = edited["mean_revisions"].round(2)
+        out["authors_edited"] = edited
+
+    years = (
+        tables["editions"].filter(F.col("work_key").isNotNull())
+        .groupBy("work_key")
+        .agg(F.max(F.col("publish_year").isNotNull().cast("int")).alias(
+            "edition_has_year"))
+    )
+    works = (
+        tables["works"].select("work_key", "work_year")
+        .join(years, "work_key", "left")
+        .groupBy(
+            F.when(F.col("work_year").isNotNull(), "own year given")
+            .when(F.col("edition_has_year") == 1,
+                  "no own year, an edition gives one")
+            .when(F.col("edition_has_year") == 0,
+                  "no own year, editions undated")
+            .otherwise("no own year, no edition linked").alias("work year"))
+        .count().toPandas().rename(columns={"count": "works"})
+    )
+    works["share_pct"] = (100 * works["works"] / works["works"].sum()).round(2)
+    out["works"] = works.sort_values("works", ascending=False).reset_index(
+        drop=True)
+
+    editions = (
+        tables["editions"].groupBy(
+            F.when(F.col("work_key").isNotNull(), "linked to a work")
+            .otherwise("no work link").alias("work link"))
+        .agg(F.count(F.lit(1)).alias("editions"),
+             F.round(100 * F.avg(F.col("publish_year").isNotNull()
+                                 .cast("int")), 1).alias("dated_pct"),
+             F.round(100 * F.avg(F.col("ocaid").isNotNull().cast("int")),
+                     1).alias("digitized_pct"))
+        .toPandas()
+    )
+    editions["share_pct"] = (100 * editions["editions"]
+                             / editions["editions"].sum()).round(2)
+    out["editions"] = editions
+    return out
+
+
 def find_duplicate_keys(tables):
     """Count keys that appear more than once in each record table.
 
@@ -975,7 +1837,7 @@ def choose_death_year(ol_year, wd_year):
     return None, None
 
 
-def reconcile_author_deaths(authors, wikidata):
+def reconcile_author_deaths(authors, wikidata=None):
     """Attach one death year (and birth year) to every Open Library author.
 
     Links an author to Wikidata in BOTH directions: the author record's
@@ -984,6 +1846,11 @@ def reconcile_author_deaths(authors, wikidata):
     year is used (the conservative choice). Agreement between the two
     sources is measured on authors that have both.
 
+    With wikidata=None (the Jojie snapshot has no Wikidata dump) every
+    year comes from Open Library's own birth_date / death_date text, the
+    Wikidata columns are null, wd_philippine_citizen is False, and the
+    agreement table counts zero authors with both sources.
+
     Returns
     -------
     dict
@@ -991,6 +1858,16 @@ def reconcile_author_deaths(authors, wikidata):
         source_summary / agreement (pandas tables for the report).
     """
     from pyspark.sql import functions as F
+    from pyspark.sql import types as T
+
+    if wikidata is None:
+        wikidata = authors.sparkSession.createDataFrame([], T.StructType([
+            T.StructField("qid", T.StringType()),
+            T.StructField("ol_author_ids", T.ArrayType(T.StringType())),
+            T.StructField("wd_birth_year", T.IntegerType()),
+            T.StructField("wd_death_year", T.IntegerType()),
+            T.StructField("wd_philippine_citizen", T.BooleanType()),
+        ]))
 
     wd_by_ol = (
         wikidata.select(
@@ -1070,17 +1947,183 @@ def reconcile_author_deaths(authors, wikidata):
              != (F.col("ol_death_year") <= REFERENCE_YEAR - 51)), 1
         ).otherwise(0)).alias("ph_status_would_flip"),
     ).toPandas()
+    # sums over zero rows are null; with no Wikidata they must read 0
+    agreement = agreement.fillna(0).astype(int)
     n = agreement.loc[0, "authors_with_both"]
     for column in ["exact_match", "within_one_year", "differ_over_10",
                    "ph_status_would_flip"]:
         agreement[f"{column}_pct"] = (
             round(100 * agreement.loc[0, column] / n, 2) if n else np.nan
         )
+    # the summaries are done; free the memory (the caller saves the
+    # table as Parquet, which recomputes it once)
+    deaths.unpersist()
     return {
         "author_deaths": deaths,
         "source_summary": source_summary.reset_index(drop=True),
         "agreement": agreement,
     }
+
+
+def full_dump_census(full_dump, tables):
+    """Live, redirected and deleted records per namespace, and a check.
+
+    The all-types dump holds the latest version of every key, so a key
+    whose record was merged into another is a /type/redirect and a
+    removed one is a /type/delete. The live works, editions and authors
+    in it must equal the rows of the separately parsed tables, which
+    checks the two files against each other.
+
+    Returns
+    -------
+    DataFrame
+        namespace, live, redirect, delete, other, redirect_pct,
+        parsed_table_rows, matches.
+    """
+    counts = full_dump.toPandas()
+    live_type = {"/works": "/type/work", "/books": "/type/edition",
+                 "/authors": "/type/author"}
+    table_name = {"/works": "works", "/books": "editions",
+                  "/authors": "authors"}
+    rows = []
+    for prefix, live in live_type.items():
+        part = counts[counts["key_prefix"] == prefix]
+        by_type = part.groupby("record_type")["records"].sum()
+        n_live = int(by_type.get(live, 0))
+        n_redirect = int(by_type.get("/type/redirect", 0))
+        n_delete = int(by_type.get("/type/delete", 0))
+        parsed = tables[table_name[prefix]].count()
+        rows.append({
+            "namespace": prefix, "live": n_live, "redirect": n_redirect,
+            "delete": n_delete,
+            "other": int(by_type.sum()) - n_live - n_redirect - n_delete,
+            "redirect_pct": round(100 * n_redirect / max(by_type.sum(), 1),
+                                  2),
+            "parsed_table_rows": parsed, "matches": parsed == n_live,
+        })
+    return pd.DataFrame(rows)
+
+
+def record_type_census(full_dump):
+    """Records of every type in the all-types dump (pandas)."""
+    table = (full_dump.toPandas().groupby("record_type")["records"].sum()
+             .sort_values(ascending=False).reset_index())
+    table["share_pct"] = (100 * table["records"]
+                          / table["records"].sum()).round(3)
+    return table
+
+
+def revision_activity(revisions, start=2008, end=MAX_VALID_YEAR):
+    """Records created and edits saved per year, for the three main types.
+
+    Revision 1 of a key is its creation; every later revision is an
+    edit. Returns a pandas table with one row per year and, for works,
+    editions and authors, the records created and the edits made.
+    """
+    from pyspark.sql import functions as F
+
+    main = {"/type/work": "works", "/type/edition": "editions",
+            "/type/author": "authors"}
+    table = (
+        revisions.filter(F.col("record_type").isin(*main))
+        .withColumn("year", F.year("modified"))
+        .filter(F.col("year").between(start, end))
+        .groupBy("year", "record_type")
+        .agg(F.sum((F.col("revision") == 1).cast("int")).alias("created"),
+             F.sum((F.col("revision") > 1).cast("int")).alias("edits"))
+        .toPandas()
+    )
+    table["record_type"] = table["record_type"].map(main)
+    wide = table.pivot(index="year", columns="record_type",
+                       values=["created", "edits"]).fillna(0).astype(int)
+    wide.columns = [f"{kind}_{name}" for kind, name in wide.columns]
+    return wide.sort_index()
+
+
+def death_year_history(revisions, author_deaths):
+    """Trace every current author's death year through its revisions.
+
+    For each author still in the catalogue: when the record was created,
+    when a parsable death year first appeared, the first death year ever
+    recorded, how many different death years its revisions have carried,
+    and the Philippine (life + 50) status each of those years implies.
+
+    Returns
+    -------
+    dict
+        per_author (Spark DataFrame), coverage (pandas: per year, the
+        cumulative authors created and with a death year, for authors
+        alive in the current dump), stability (pandas, one row) and
+        entrants (pandas: year in which the death year of each author
+        who died in 1976 was first recorded).
+    """
+    from pyspark.sql import functions as F
+
+    entering = REFERENCE_YEAR - 51
+    revs = (
+        revisions.filter((F.col("record_type") == "/type/author")
+                         & F.col("key").isNotNull())
+        .select(F.col("key").alias("author_key"), "revision", "modified",
+                "ol_death_year")
+        .join(author_deaths.select("author_key"), "author_key", "left_semi")
+    )
+    ph_code = (F.when(F.col("ol_death_year") < entering, "pd")
+               .when(F.col("ol_death_year") == entering, "enters")
+               .when(F.col("ol_death_year").isNotNull(), "protected"))
+    first_death = F.min(F.when(
+        F.col("ol_death_year").isNotNull(),
+        F.struct("revision", "ol_death_year")))
+    per_author = (
+        revs.groupBy("author_key").agg(
+            F.min("modified").alias("created"),
+            F.min(F.when(F.col("ol_death_year").isNotNull(),
+                         F.col("modified"))).alias("death_added"),
+            first_death.getField("ol_death_year").alias("first_death_year"),
+            F.countDistinct("ol_death_year").alias("n_death_values"),
+            F.size(F.collect_set(ph_code)).alias("n_ph_codes"),
+            F.count(F.lit(1)).alias("n_revisions"),
+        )
+        .join(author_deaths.select("author_key", "death_year"),
+              "author_key", "left")
+    ).cache()
+
+    created = per_author.groupBy(F.year("created").alias("year")).count()
+    added = (per_author.filter(F.col("death_year").isNotNull())
+             .groupBy(F.year("death_added").alias("year")).count())
+    coverage = (
+        created.withColumnRenamed("count", "created")
+        .join(added.withColumnRenamed("count", "death_added"), "year",
+              "full_outer")
+        .fillna(0).toPandas().dropna().sort_values("year")
+    )
+    coverage["year"] = coverage["year"].astype(int)
+    coverage["authors_cum"] = coverage["created"].cumsum()
+    coverage["with_death_cum"] = coverage["death_added"].cumsum()
+    coverage["pct_with_death"] = (100 * coverage["with_death_cum"]
+                                  / coverage["authors_cum"]).round(2)
+
+    has_death = F.col("death_year").isNotNull()
+    stability = per_author.agg(
+        F.count(F.lit(1)).alias("authors"),
+        F.sum(has_death.cast("int")).alias("with_death_now"),
+        F.sum((has_death & (F.col("n_death_values") > 1)).cast("int"))
+        .alias("death_year_changed"),
+        F.sum((has_death & (F.col("n_ph_codes") > 1)).cast("int"))
+        .alias("ph_status_changed"),
+        F.sum((~has_death & F.col("death_added").isNotNull()).cast("int"))
+        .alias("death_year_removed"),
+        F.sum((has_death & (F.col("death_added") > F.col("created")))
+              .cast("int")).alias("death_added_after_creation"),
+    ).toPandas()
+    entrants = (
+        per_author.filter(F.col("death_year") == entering)
+        .groupBy(F.year("death_added").alias("year_recorded")).count()
+        .toPandas().sort_values("year_recorded").reset_index(drop=True)
+    )
+    entrants["cum_pct"] = (100 * entrants["count"].cumsum()
+                           / entrants["count"].sum()).round(1)
+    return {"per_author": per_author, "coverage": coverage,
+            "stability": stability, "entrants": entrants}
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +2380,7 @@ def summarize_status(status):
     total = combos["works"].sum()
 
     def by(column):
+        """Works and share per label of one status column."""
         table = combos.groupby(column, as_index=False)["works"].sum()
         table["share_pct"] = (100 * table["works"] / total).round(2)
         return table.sort_values("works", ascending=False).reset_index(
@@ -1377,6 +2421,7 @@ def status_by_regime(status):
     from pyspark.sql import functions as F
 
     def group(code_col, regime):
+        """Spark expression mapping a status code to a common group."""
         if regime == "us":
             return (
                 F.when(F.col(code_col) == "pd", "Public domain already")
@@ -1425,7 +2470,7 @@ def first_year_histogram(status, start=1800, end=MAX_VALID_YEAR):
 # ---------------------------------------------------------------------------
 
 
-def compute_demand(reading_log, ratings, trend_end=date(2026, 10, 31)):
+def compute_demand(reading_log, ratings, trend_end=DUMP_DATE):
     """Per-work demand signals.
 
     * want_to_read, currently_reading, already_read: shelf entries;
@@ -1489,8 +2534,8 @@ def summarize_shelves(reading_log, ratings):
             "ratings": rating_counts.reset_index(drop=True)}
 
 
-def monthly_want_to_read(reading_log, status, start="2015-01-01",
-                         end="2026-10-31"):
+def monthly_want_to_read(reading_log, status, start="2017-10-01",
+                         end=DUMP_DATE.isoformat()):
     """Monthly Want-to-Read entries split by the work's rights group.
 
     Groups: "US PD (<=1930)", "Enters 2027", "Renewal unknown (1932-63)"
@@ -1599,6 +2644,7 @@ def compare_groups(profile):
     from pyspark.sql import functions as F
 
     def share(cond):
+        """Percentage of rows meeting a condition, rounded to 2 places."""
         return F.round(100 * F.avg(cond.cast("int")), 2)
 
     table = (
@@ -1644,6 +2690,7 @@ def demand_supply_grid(profile, demand_bins=(0, 1, 10, 100, 1000),
     from pyspark.sql import functions as F
 
     def band(column, edges):
+        """Spark expression and labels for binning a column by edges."""
         expr = None
         labels = []
         for i, low in enumerate(edges):
@@ -1731,9 +2778,15 @@ def add_author_names(selected, authors):
 
 
 def _finish_list(selected, order, top_n, authors):
-    """Shared tail of the two list builders: limit, add names, sort."""
+    """Shared tail of the two list builders: limit, add names, sort.
+
+    n_records (how many duplicate work records a title merges) is shown
+    when the input is the consolidated title table.
+    """
+    display = DISPLAY_COLUMNS + [c for c in ["n_records"]
+                                 if c in selected.columns]
     if top_n is None:
-        return selected.select(*DISPLAY_COLUMNS)
+        return selected.select(*display)
     top = selected.orderBy(*order).limit(top_n)
     if authors is not None:
         top = add_author_names(top, authors)
@@ -1746,8 +2799,8 @@ def _finish_list(selected, order, top_n, authors):
     for column in ["first_year", "last_death_year"]:
         table[column] = table[column].astype("Int64")
     table["ratings_mean"] = table["ratings_mean"].round(2)
-    columns = DISPLAY_COLUMNS[:2] + (["authors"] if authors is not None
-                                     else []) + DISPLAY_COLUMNS[2:]
+    columns = display[:2] + (["authors"] if authors is not None
+                             else []) + display[2:]
     return table[columns]
 
 
@@ -1827,7 +2880,8 @@ def selection_funnel(profile, min_want_to_read, max_recent_editions=1):
             ("no data-quality flag", unflagged),
             ("enters the public domain on 1 Jan 2027", entering),
             (f"high demand (>= {min_want_to_read} Want-to-Read)", demand),
-            (f"low supply (<= {max_recent_editions} recent edition)",
+            (f"low supply (<= {max_recent_editions} edition since "
+             f"{RECENT_FROM_YEAR})",
              supply),
         ],
         "public-domain list": [
@@ -2021,6 +3075,251 @@ def philippine_authors_summary(profile):
     )
 
 
+def normalize_title(title):
+    """Pure-Python twin of title_key: a comparable form of a title.
+
+    Lowercases, turns every run of characters that are neither letters
+    nor digits into one space, and drops a leading English article, so
+    "The Intelligent Investor" and "Intelligent investor." compare equal.
+    Letters of any script are kept. Returns "" for an empty title.
+    """
+    if title is None:
+        return ""
+    text = re.sub(r"[\W_]+", " ", str(title).lower()).strip()
+    return re.sub(r"^(the|a|an) ", "", text)
+
+
+def title_key(column):
+    """Spark expression mirroring normalize_title."""
+    from pyspark.sql import functions as F
+
+    text = F.trim(F.regexp_replace(F.lower(column), r"[^\p{L}\p{N}]+", " "))
+    return F.coalesce(F.regexp_replace(text, r"^(the|a|an) ", ""), F.lit(""))
+
+
+def consolidate_titles(profile, reference_year=REFERENCE_YEAR):
+    """Merge duplicate work records into one row per title.
+
+    Open Library often holds several work records for one book, each with
+    part of its editions and shelf entries, so a single record understates
+    both demand and supply. Records are merged when they share the
+    normalized title AND exactly the same set of author keys; a record
+    with no title or no author stays on its own. Requiring the same
+    authors keeps the merge conservative (it cannot join different books
+    by different people), at the price of leaving apart duplicates whose
+    titles differ, for example by a subtitle.
+
+    Per title: shelf, rating and edition counts are summed; first_year is
+    the earliest of the records; the US status and the two list columns
+    are recomputed from it; the Philippine status is shared by
+    construction (same authors). n_publishers, n_recent_publishers and
+    n_languages take the largest record's value, a lower bound, because
+    distinct names cannot be recounted from per-record totals. work_key
+    and title are those of the record with the most Want-to-Read entries.
+
+    Returns
+    -------
+    Spark DataFrame
+        The profile's list columns, one row per title, plus n_records.
+    """
+    from pyspark.sql import functions as F
+
+    key = title_key(F.col("title"))
+    title_id = F.when(
+        (key != "") & (F.size("author_keys") > 0),
+        F.concat_ws("|", key, F.array_join(F.array_sort("author_keys"),
+                                           ",")),
+    ).otherwise(F.col("work_key"))
+    summed = ["want_to_read", "currently_reading", "already_read",
+              "shelf_total", "wtr_last_12m", "wtr_prev_12m",
+              "ratings_count", "n_editions", "n_recent_editions",
+              "n_digitized", "n_filipino_editions"]
+    largest = ["n_publishers", "n_recent_publishers", "n_languages",
+               "latest_edition_year", "last_death_year", "last_birth_year"]
+    shared = ["author_keys", "n_authors", "n_authors_with_death",
+              "ph_code", "life70_code", "has_philippine_author",
+              "author_dates_conflict"]
+    rating_sum = F.sum(F.col("ratings_mean") * F.col("ratings_count"))
+    titles = (
+        profile.withColumn("title_id", title_id).groupBy("title_id").agg(
+            F.count(F.lit(1)).alias("n_records"),
+            # the most-shelved record represents the title
+            F.max(F.struct("want_to_read", "n_editions", "work_key",
+                           "title")).alias("_best"),
+            F.min("first_year").alias("first_year"),
+            F.max(F.col("is_fiction").cast("int")).cast("boolean").alias(
+                "is_fiction"),
+            *[F.sum(c).alias(c) for c in summed],
+            *[F.max(c).alias(c) for c in largest],
+            *[F.first(c).alias(c) for c in shared],
+            rating_sum.alias("_rating_sum"),
+        )
+        .withColumn("work_key", F.col("_best.work_key"))
+        .withColumn("title", F.col("_best.title"))
+        .withColumn("ratings_mean", F.when(
+            F.col("ratings_count") > 0,
+            F.col("_rating_sum") / F.col("ratings_count")))
+        .drop("_best", "_rating_sum")
+    )
+    # the flags and status of a title follow from its earliest year
+    return (
+        titles.withColumn("year_before_birth", F.coalesce(
+            F.col("first_year") < F.col("last_birth_year") + 10,
+            F.lit(False)))
+        .withColumn("gap_after_death", F.coalesce(
+            F.col("first_year") - F.col("last_death_year") > 70,
+            F.lit(False)))
+        .withColumn("us_code", us_status_column(F.col("first_year"),
+                                                reference_year))
+        .withColumn("flagged", F.col("year_before_birth")
+                    | F.col("author_dates_conflict"))
+        .withColumn("potentially_pd", ~F.col("flagged") & (
+            (F.col("us_code") == "pd") | (F.col("ph_code") == "pd")))
+        .withColumn("enters_2027", ~F.col("flagged") & (
+            (F.col("us_code") == "enters") | (F.col("ph_code") == "enters")))
+    )
+
+
+def consolidation_summary(profile, titles):
+    """What merging duplicate records changes (pandas, one row).
+
+    Returns records, titles, the records absorbed into another row, the
+    titles built from several records, and the Want-to-Read entries that
+    sit on such multi-record titles.
+    """
+    from pyspark.sql import functions as F
+
+    n_records = profile.count()
+    row = titles.agg(
+        F.count(F.lit(1)).alias("titles"),
+        F.sum((F.col("n_records") > 1).cast("int")).alias(
+            "titles_from_several_records"),
+        F.max("n_records").alias("largest_title_records"),
+        F.sum("want_to_read").alias("wtr"),
+        F.sum(F.when(F.col("n_records") > 1, F.col("want_to_read"))
+              .otherwise(0)).alias("wtr_on_merged"),
+    ).collect()[0]
+    return pd.DataFrame([{
+        "work_records": n_records, "titles": row["titles"],
+        "records_absorbed": n_records - row["titles"],
+        "absorbed_pct": round(100 * (n_records - row["titles"])
+                              / n_records, 2),
+        "titles_from_several_records": row["titles_from_several_records"],
+        "largest_title_records": row["largest_title_records"],
+        "wtr_on_merged_titles_pct": round(
+            100 * row["wtr_on_merged"] / row["wtr"], 1) if row["wtr"]
+        else np.nan,
+    }])
+
+
+def first_year_sensitivity(editions, status, min_years=3,
+                           reference_year=REFERENCE_YEAR):
+    """US status under a more cautious first-year rule (pandas).
+
+    The baseline takes the EARLIEST edition year, so one mis-dated
+    edition makes a work look older. The alternative ignores a lone
+    earliest date: for a work with at least `min_years` distinct edition
+    years it uses the SECOND-earliest one (works with fewer keep the
+    earliest; the work's own first_publish_date still counts). The table
+    shows, per baseline US group, how many works keep their group and
+    how many move, which bounds how much of each group rests on a single
+    edition date.
+
+    Returns
+    -------
+    DataFrame
+        One row per baseline US status: works, tested (works with at
+        least min_years distinct years), moved, moved_pct (of works).
+    """
+    from pyspark.sql import functions as F
+
+    years = (
+        editions.filter(F.col("work_key").isNotNull()
+                        & F.col("publish_year").isNotNull())
+        .groupBy("work_key")
+        .agg(F.array_sort(F.collect_set("publish_year")).alias("_years"))
+        .select("work_key",
+                F.size("_years").alias("_n_years"),
+                # get() gives null, not an error, for a single year
+                F.get("_years", F.lit(1)).alias("_second_year"))
+    )
+    tested = F.coalesce(F.col("_n_years") >= min_years, F.lit(False))
+    compared = (
+        status.select("work_key", "work_year", "first_year", "us_code")
+        .join(years, "work_key", "left")
+        .withColumn("_alt_year", F.when(
+            tested, F.least("work_year", "_second_year")
+        ).otherwise(F.col("first_year")))
+        .withColumn("_alt_code", us_status_column(F.col("_alt_year"),
+                                                  reference_year))
+        .groupBy("us_code")
+        .agg(F.count(F.lit(1)).alias("works"),
+             F.sum(tested.cast("int")).alias("tested"),
+             F.sum((F.col("_alt_code") != F.col("us_code")).cast("int"))
+             .alias("moved"))
+        .toPandas()
+    )
+    compared["moved_pct"] = (100 * compared["moved"]
+                             / compared["works"]).round(2)
+    compared["US status"] = compared["us_code"].map(US_LABELS)
+    compared["order"] = compared["us_code"].map(list(US_LABELS).index)
+    return (compared.sort_values("order")
+            [["US status", "works", "tested", "moved", "moved_pct"]]
+            .reset_index(drop=True))
+
+
+def born_long_ago_sensitivity(status, author_deaths, born_before=1850,
+                              reference_year=REFERENCE_YEAR):
+    """Works a "certainly dead" rule would move to Philippine PD (pandas).
+
+    The baseline leaves a work "unknown" when any author lacks a death
+    year. The alternative accepts one safe inference: an author born
+    before `born_before` with no recorded death was certainly dead before
+    the entering year (born 1849 at the latest, such an author would have
+    been 127 in 1976; no verified human life exceeds 122 years). A work
+    moves to "public domain" when every author either has a death year
+    before the entering year or is covered by that inference.
+
+    Returns
+    -------
+    DataFrame
+        One row: works unknown under the baseline, works that would move,
+        their share, and how many of the movers are not already public
+        domain under the US rule.
+    """
+    from pyspark.sql import functions as F
+
+    entering = reference_year - 51
+    unknown = status.filter(F.col("ph_code") == "unknown_death")
+    facts = (
+        unknown.select("work_key", "us_code",
+                       F.explode("author_keys").alias("author_key"))
+        .join(author_deaths.select("author_key", "death_year",
+                                   "birth_year"), "author_key", "left")
+    )
+    inferred = F.col("death_year").isNull() & F.coalesce(
+        F.col("birth_year") < born_before, F.lit(False))
+    dead_before = F.coalesce(F.col("death_year") < entering, F.lit(False))
+    movers = (
+        facts.groupBy("work_key", "us_code")
+        .agg(F.min((inferred | dead_before).cast("int")).alias("_all"))
+        .filter(F.col("_all") == 1)
+    )
+    row = movers.agg(
+        F.count(F.lit(1)).alias("moved"),
+        F.sum((F.col("us_code") != "pd").cast("int")).alias("not_us_pd"),
+    ).collect()[0]
+    n_unknown = unknown.count()
+    moved = row["moved"] or 0
+    return pd.DataFrame([{
+        "works_unknown_death": n_unknown,
+        "would_become_ph_public_domain": moved,
+        "share_of_unknown_pct": round(100 * moved / n_unknown, 2)
+        if n_unknown else np.nan,
+        "of_which_not_us_public_domain": row["not_us_pd"] or 0,
+    }])
+
+
 # ---------------------------------------------------------------------------
 # PART 9: VALIDATION (INDEPENDENT RECOUNTS)
 # ---------------------------------------------------------------------------
@@ -2040,6 +3339,7 @@ def validate_analysis(tables, status, profile, watchlist,
     checks = []
 
     def add(name, expected, actual):
+        """Append one result row."""
         checks.append({"check": name, "expected": expected,
                        "actual": actual, "passed": expected == actual})
 
@@ -2052,31 +3352,34 @@ def validate_analysis(tables, status, profile, watchlist,
         .collect()[0][0]
     add("US status groups sum to all works", n_works, int(us_total))
 
-    linked = tables["editions"].join(
-        tables["works"].select("work_key"), "work_key", "left_semi"
-    ).count()
-    add("edition rows linked to known works = sum of n_editions", linked,
-        int(profile.agg(F.sum("n_editions")).collect()[0][0]))
+    work_keys = tables["works"].select("work_key")
+    # one pass over the raw edition rows of known works gives all three
+    # edition recounts (the profile got them from the per-work aggregate)
+    editions = tables["editions"].join(work_keys, "work_key", "left_semi")
+    recount = editions.agg(
+        F.count(F.lit(1)).alias("linked"),
+        F.sum(F.col("ocaid").isNotNull().cast("int")).alias("scans"),
+        F.sum(F.coalesce(F.col("publish_year") >= RECENT_FROM_YEAR,
+                         F.lit(False)).cast("int")).alias("recent"),
+    ).collect()[0]
+    sums = profile.agg(
+        F.sum("n_editions").alias("n_editions"),
+        F.sum("want_to_read").alias("want_to_read"),
+        F.sum("n_digitized").alias("n_digitized"),
+        F.sum("n_recent_editions").alias("n_recent_editions"),
+    ).collect()[0]
+    add("edition rows linked to known works = sum of n_editions",
+        recount["linked"], int(sums["n_editions"]))
 
     wtr_linked = tables["reading_log"].filter(
         F.col("shelf") == "Want to Read"
-    ).join(tables["works"].select("work_key"), "work_key",
-           "left_semi").count()
+    ).join(work_keys, "work_key", "left_semi").count()
     add("Want-to-Read rows on known works = sum of want_to_read",
-        wtr_linked, int(profile.agg(F.sum("want_to_read")).collect()[0][0]))
-
-    scans = tables["editions"].filter(F.col("ocaid").isNotNull()).join(
-        tables["works"].select("work_key"), "work_key", "left_semi"
-    ).count()
-    add("digitized editions on known works = sum of n_digitized", scans,
-        int(profile.agg(F.sum("n_digitized")).collect()[0][0]))
-
-    recent = tables["editions"].filter(
-        F.col("publish_year") >= RECENT_FROM_YEAR
-    ).join(tables["works"].select("work_key"), "work_key",
-           "left_semi").count()
+        wtr_linked, int(sums["want_to_read"]))
+    add("digitized editions on known works = sum of n_digitized",
+        recount["scans"], int(sums["n_digitized"]))
     add("recent editions on known works = sum of n_recent_editions",
-        recent, int(profile.agg(F.sum("n_recent_editions")).collect()[0][0]))
+        recount["recent"], int(sums["n_recent_editions"]))
 
     wl = watchlist if isinstance(watchlist, pd.DataFrame) else \
         watchlist.toPandas()
@@ -2108,13 +3411,14 @@ def validate_analysis(tables, status, profile, watchlist,
     return pd.DataFrame(checks)
 
 
-# Hand-checked facts for the 15 top-ranked rows of the 2027 watchlist (W)
-# and of the potentially-public-domain list (P), as they appear in the
-# report. Each value was checked by hand against publisher, library and
+# Hand-checked facts for 30 well-known, high-demand works: 15 candidates
+# for the 2027 watchlist (W) and 15 for the potentially-public-domain list
+# (P). Each value was checked by hand against publisher, library and
 # encyclopaedia records; None means "not checked" (the listing does not
-# depend on it, or no reliable source was found). These rows were chosen
-# because they are the ones a reader would act on first, so they are a
-# check of the lists' top, not a random sample of the catalogue.
+# depend on it, or no reliable source was found). The facts do not depend
+# on the dump, so the audit applies to any snapshot; works absent from a
+# snapshot are skipped. This is a check of high-demand works a reader
+# would act on first, not a random sample of the catalogue.
 AUDIT_SAMPLE = [
     # list, work_key, checked first year, checked last-author death, note
     ("W", "/works/OL267968W", 1931, None,
@@ -2143,8 +3447,8 @@ AUDIT_SAMPLE = [
     ("P", "/works/OL1063267W", 1936, 1955, "Carnegie d. 1955"),
     ("P", "/works/OL66554W", 1813, 1817, "Austen d. 1817"),
     ("P", "/works/OL244537W", -500, None,
-     "Ancient text (c. 5th century BC); catalogue year 1900 is a "
-     "placeholder"),
+     "Ancient text (c. 5th century BC); only modern editions are "
+     "catalogued"),
     ("P", "/works/OL3923952W", 1948, 1948, "Dazai d. 1948"),
     ("P", "/works/OL27482W", 1937, 1973, "Tolkien d. 1973"),
     ("P", "/works/OL10263W", 1943, 1944, "Saint-Exupery d. 1944"),
@@ -2152,12 +3456,76 @@ AUDIT_SAMPLE = [
     ("P", "/works/OL498556W", 1915, 1924, "Kafka d. 1924"),
     ("P", "/works/OL8165007W", 1926, 1957, "Clason d. 1957"),
     ("P", "/works/OL21177W", 1847, 1848,
-     "Published 1847 (catalogue says 1846)"),
+     "Published 1847; E. Bronte d. 1848"),
     ("P", "/works/OL166894W", 1866, 1881, "Dostoevsky d. 1881"),
     ("P", "/works/OL1230613W", 1942, 1960, "Camus d. 1960"),
     ("P", "/works/OL262421W", 1892, 1930, "Conan Doyle d. 1930"),
     ("P", "/works/OL64365W", 1932, 1963, "Huxley d. 1963"),
 ]
+
+
+# Hand check of every title on the 2027 watchlist of the 20221007
+# snapshot: first publication and the death year of every author, looked
+# up in encyclopaedia and library records. Verdicts:
+#   confirmed       the title enters the public domain as estimated
+#   already free    it is free, but earlier than estimated
+#   needs care      the record is not one single book
+#   false positive  it does not enter the public domain in 2027
+WATCHLIST_REVIEW = {
+    "/works/OL273187W": (
+        "confirmed", "Graham d. 1976; use the 1949 or 1973 text, not the "
+        "2003 edition with new commentary"),
+    "/works/OL267968W": (
+        "confirmed", "1931 first edition only; every later revision "
+        "stays protected"),
+    "/works/OL6563302W": (
+        "confirmed", "McGraw-Hill 1931 first edition only"),
+    "/works/OL1127268W": ("confirmed", "Little, Brown 1931"),
+    "/works/OL472833W": (
+        "confirmed", "Christie d. 1976; collection of her plays"),
+    "/works/OL471559W": (
+        "confirmed", "Christie d. 1976; published 1977, and the term for "
+        "a posthumous work is the same"),
+    "/works/OL472688W": (
+        "confirmed", "Christie d. 1976, writing as Mary Westmacott"),
+    "/works/OL4775275W": (
+        "confirmed", "Boyer d. 1976; first published 1939 as The "
+        "Concepts of the Calculus"),
+    "/works/OL2906425W": ("confirmed", "Dennis d. 1976; published 1955"),
+    "/works/OL472813W": (
+        "needs care", "Christie d. 1976, but the record mixes several "
+        "omnibus volumes"),
+    "/works/OL273188W": (
+        "false positive", "co-author David Dodd (d. 1988) is missing "
+        "from the record; protected in the Philippines until 2039"),
+    "/works/OL3408913W": ("confirmed", "Getty d. 1976; published 1965"),
+    "/works/OL5367088W": ("confirmed", "Little, Brown 1931"),
+    "/works/OL15148479W": (
+        "confirmed", "Kinross d. 1976; published 1977"),
+    "/works/OL4134118W": ("confirmed", "Gallico d. 1976; published 1958"),
+    "/works/OL2139804W": (
+        "already free", "first published 1916 and Saussure d. 1913; the "
+        "earliest catalogued edition is 1931"),
+    "/works/OL1132800W": (
+        "false positive", "Bieber d. 1978, not 1976 as catalogued; "
+        "protected in the Philippines until 2029"),
+}
+
+
+def review_watchlist(watchlist, review=None):
+    """Attach the hand-check verdict and note to each watchlist row.
+
+    Rows without an entry in `review` (WATCHLIST_REVIEW by default) are
+    marked "not checked", so a list built from another snapshot shows at
+    once which of its titles still need a look.
+    """
+    review = WATCHLIST_REVIEW if review is None else review
+    table = watchlist.copy()
+    checks = table["work_key"].map(
+        lambda key: review.get(key, ("not checked", "")))
+    table["check"] = [verdict for verdict, _ in checks]
+    table["note"] = [note for _, note in checks]
+    return table
 
 
 def compare_codes(estimated, checked):
@@ -2420,7 +3788,7 @@ def plot_monthly_wtr(monthly):
         _style(ax)
     axes[-1].set_xlabel("Month logged")
     fig.suptitle("Want-to-Read entries per month, by rights group "
-                 "(entries still on a shelf in Oct 2026)")
+                 f"(entries still on a shelf on {DUMP_DATE:%d %b %Y})")
     fig.tight_layout()
     return fig
 
@@ -2431,7 +3799,8 @@ def plot_supply_comparison(groups):
     data = groups.set_index("US status")[
         ["pct_with_recent_edition", "pct_digitized", "pct_filipino"]
     ].rename(columns={
-        "pct_with_recent_edition": "Has an edition from 2017 on",
+        "pct_with_recent_edition":
+            f"Has an edition from {RECENT_FROM_YEAR} on",
         "pct_digitized": "Has a digitized copy",
         "pct_filipino": "Has a Filipino-language edition",
     })
@@ -2475,14 +3844,17 @@ def plot_watchlist(watchlist, top_n=20):
     return fig
 
 
-def plot_pipeline_diagram():
+def plot_pipeline_diagram(facts=None):
     """Draw the analysis pipeline as a left-to-right flow diagram.
+
+    `facts` fills in the run's own numbers: raw_gb, the size of the raw
+    snapshot in GiB (shown as "?" when missing).
 
     Each card is one stage: a coloured title band (colours follow the
     report's colour system), the main operations, and the helper function
     that implements it, so the figure doubles as a map from the
     methodology to the code. Lanes underneath group the stages into the
-    three phases described in Section 4.1. Returns a matplotlib Figure.
+    three phases described in Section 3. Returns a matplotlib Figure.
     """
     from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
@@ -2495,6 +3867,7 @@ def plot_pipeline_diagram():
 
     def card(x, y, w, h, number, title, lines, func, color):
         # card body with a thin border in the stage colour
+        """Draw one pipeline stage as a card with a coloured title band."""
         ax.add_patch(FancyBboxPatch(
             (x, y), w, h, boxstyle="round,pad=0,rounding_size=0.10",
             linewidth=1.3, edgecolor=color, facecolor="white", zorder=2))
@@ -2518,30 +3891,34 @@ def plot_pipeline_diagram():
                 fontweight="bold", zorder=4)
 
     def arrow(x1, y1, x2, y2, color=MUTED):
+        """Draw an arrow between two points."""
         ax.add_patch(FancyArrowPatch(
             (x1, y1), (x2, y2), arrowstyle="-|>", mutation_scale=13,
             linewidth=1.3, color=color, zorder=1,
             connectionstyle="arc3,rad=0"))
 
     def lane(x1, x2, label, color):
+        """Draw a phase lane with its label under the cards."""
         ax.plot([x1, x2], [-0.3, -0.3], color=color, lw=3,
                 solid_capstyle="round")
         ax.text((x1 + x2) / 2, -0.62, label, ha="center", va="center",
                 fontsize=9, color=color, fontweight="bold")
 
-    card(0.1, 1.9, 2.15, 2.6, 1, "Raw dumps",
-         ["6 monthly .txt.gz files", "Oct 2026, 18.5 GB",
-          "works, editions, authors,", "wikidata, reading log,",
-          "ratings"], "discover_dumps", GREY)
+    facts = {"raw_gb": "?", **(facts or {})}
+    card(0.1, 1.9, 2.15, 2.6, 1, "Raw snapshot",
+         [f"{DATA_SNAPSHOT} on Jojie,", f"{facts['raw_gb']} GiB, 7 .gz files",
+          "5 record dumps +", "all-types dump +", "revision history"],
+         "raw_input_size", GREY)
     card(2.6, 1.9, 2.15, 2.6, 2, "Parse",
-         ["PySpark, explicit schemas", "free-text dates -> years",
-          "publisher names cleaned", "6 concurrent jobs"],
+         ["gunzip -> splittable text", "PySpark, explicit schemas",
+          "free-text dates -> years", "history files: 3 jobs"],
          "build_parquet_tables", INK)
     card(5.1, 1.9, 2.0, 2.6, 3, "Parquet",
-         ["6 clean tables, 3.2 GB", "field coverage profile",
-          "duplicate-key check"], "profile_tables", INK)
+         ["8 clean tables", "rows = raw lines", "coverage, nulls",
+          "merged keys resolved"],
+         "ingestion_check", INK)
     card(7.55, 4.35, 2.55, 1.95, "4a", "Rights status",
-         ["death years: OL + Wikidata", "US, PH and life+70 rules",
+         ["death years + their history", "US, PH and life+70 rules",
           "data-quality flags"], "estimate_copyright_status", PLUM)
     card(7.55, 2.2, 2.55, 1.95, "4b", "Demand",
          ["Want-to-Read, shelves", "ratings, 12-month trends"],
@@ -2550,11 +3927,13 @@ def plot_pipeline_diagram():
          ["recent editions, publishers", "scans, Filipino editions"],
          "compute_supply", INK)
     card(10.55, 2.2, 2.85, 2.3, 5, "Profile & lists",
-         ["one row per work (41.7M)", "2027 watchlist (53 works)",
-          "public-domain list", "sensitivity checks"],
+         ["one row per work",
+          "duplicate titles merged",
+          "2027 watchlist", "public-domain list"],
          "build_watchlist", AMBER)
     card(10.55, 0.05, 2.85, 1.85, 6, "Validation",
-         ["10 independent recounts", "hand-checked audit, 30 rows"],
+         ["independent recounts", "sensitivity checks",
+          "hand-checked audit"],
          "audit_estimates", GREY)
 
     arrow(2.25, 3.2, 2.6, 3.2)
@@ -2564,8 +3943,50 @@ def plot_pipeline_diagram():
         arrow(10.1, y, 10.55, 3.35, color)
     arrow(11.98, 2.2, 11.98, 1.9, AMBER)
 
-    lane(0.1, 7.1, "INGEST ONCE  (Sections 4.2-4.3)", INK)
-    lane(7.55, 10.1, "ANALYSE EVERY WORK  (4.4-4.7)", PLUM)
-    lane(10.55, 13.4, "SELECT & VERIFY  (4.8-4.10)", AMBER)
+    lane(0.1, 7.1, "INGEST & EXPLORE ONCE  (Sections 4.2-4.5)", INK)
+    lane(7.55, 10.1, "ANALYSE EVERY WORK  (4.6-4.8)", PLUM)
+    lane(10.55, 13.4, "SELECT & VERIFY  (4.9-4.10)", AMBER)
+    fig.tight_layout()
+    return fig
+
+
+def plot_death_history(coverage, entrants, activity):
+    """Three panels on how the catalogue's author data grew.
+
+    Left: edits and new records per year (catalogue activity). Middle:
+    share of authors with a death year over time. Right: cumulative
+    share of the 1976 deaths (the Philippine 2027 entrants) whose death
+    year had been recorded by each year.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
+    ax = axes[0]
+    for column, color, label in [
+        ("edits_editions", INK, "edition edits"),
+        ("created_editions", INK_LIGHT, "editions created"),
+        ("edits_authors", PLUM, "author edits"),
+        ("edits_works", GREY, "work edits"),
+    ]:
+        if column in activity:
+            ax.plot(activity.index, activity[column] / 1e6, color=color,
+                    lw=1.6, label=label)
+    ax.set_title("Catalogue activity per year")
+    ax.set_ylabel("Revisions (millions)")
+    ax.legend(fontsize=8)
+    _style(ax)
+    ax = axes[1]
+    data = coverage[coverage["year"] >= 2008]
+    ax.plot(data["year"], data["pct_with_death"], color=PLUM, lw=2)
+    ax.set_title("Authors with a death year")
+    ax.set_ylabel("Share of authors on record (%)")
+    _style(ax)
+    ax = axes[2]
+    ax.step(entrants["year_recorded"], entrants["cum_pct"], where="post",
+            color=AMBER, lw=2)
+    ax.set_title("When the 1976 deaths were recorded")
+    ax.set_ylabel("Cumulative share of 1976 deaths (%)")
+    ax.set_ylim(0, 102)
+    _style(ax)
+    for ax in axes:
+        ax.set_xlabel("Year")
     fig.tight_layout()
     return fig
