@@ -57,12 +57,19 @@ SEED = 42
 REFERENCE_DATE = date(2027, 1, 1)
 REFERENCE_YEAR = REFERENCE_DATE.year
 
-# The dump we analysed is dated 31 Oct 2026, so later years are impossible.
-MAX_VALID_YEAR = 2026
+# The dump analysed: Open Library's export of 30 September 2022, which is
+# the copy stored on Jojie in /mnt/data/public/openlibrary/20221007 (the
+# folder name is the date it was downloaded). Every date-dependent setting
+# below follows from this one date, so another dump only needs it changed.
+DUMP_DATE = date(2022, 9, 30)
+
+# A publication year after the dump year cannot be real.
+MAX_VALID_YEAR = DUMP_DATE.year
 MIN_VALID_YEAR = 1450  # printing with movable type in Europe
 
-# "Recent" supply window: the ten calendar years ending with the dump year.
-RECENT_FROM_YEAR = 2017
+# "Recent" supply window: the ten calendar years ending with the dump year
+# (2013-2022 for this dump).
+RECENT_FROM_YEAR = DUMP_DATE.year - 9
 
 # Filipino-language codes used by Open Library (MARC language codes).
 FILIPINO_LANGUAGE_KEYS = ("/languages/tgl", "/languages/fil")
@@ -74,7 +81,13 @@ WIKIDATA_PHILIPPINES = "Q928"
 DUMP_NAMES = ("works", "editions", "authors", "wikidata", "reading-log",
               "ratings")
 
+# The Jojie folder is listed first and by its full path: Jojie's shared
+# drive is slow to list (about 15 s for this folder tree), so going straight
+# to the right folder keeps the first cell fast.
+JOJIE_DUMP_DIR = "/mnt/data/public/openlibrary/20221007"
+
 DATA_DIR_CANDIDATES = (
+    JOJIE_DUMP_DIR,
     "/mnt/data/public/openlibrary",
     "/mnt/data/public/open-library",
     "/mnt/data/public/open_library",
@@ -85,9 +98,15 @@ DATA_DIR_CANDIDATES = (
 # root is searched as well.
 SHARED_DATA_ROOT = "/mnt/data/public"
 
-# The dump whose numbers the report's narrative quotes. Running on another
-# month's dump works, but the text would then need updating.
-REPORT_DUMP_DATE = "2026-10-31"
+# The dump whose numbers the report's narrative quotes, and the Jojie
+# folder date of the same files. Running on another dump works, but the
+# text would then need updating.
+REPORT_DUMP_DATE = DUMP_DATE.isoformat()
+REPORT_DUMP_ALIASES = (REPORT_DUMP_DATE, "2022-10-07")
+
+# Dumps the analysis can run without. Jojie has no Wikidata dump, so
+# without it every death year comes from Open Library's own records.
+OPTIONAL_DUMPS = ("wikidata",)
 
 DUMP_FILE_REGEX = (r"^ol_dump_{name}_(\d{{4}}-\d{{2}}-\d{{2}}|latest)"
                    r"\.txt(\.gz)?$")
@@ -316,12 +335,10 @@ def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
     rows = []
     for name in names:
         path = dumps.get(name)
-        match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name) if path \
-            else None
         row = {
             "dump": name,
             "file": path.name if path else "(not present)",
-            "dump_date": match.group(1) if match else None,
+            "dump_date": dump_date_of(path) if path else None,
             "raw_gb": round(path.stat().st_size / 1e9, 3) if path else None,
         }
         if parquet_dir is not None:
@@ -332,24 +349,38 @@ def dump_inventory(dumps, parquet_dir=None, names=DUMP_NAMES):
     return pd.DataFrame(rows)
 
 
-def check_dump_date(dumps, expected=REPORT_DUMP_DATE):
-    """Compare the dumps' dates with the date the report's text describes.
+def dump_date_of(path):
+    """Date of a dump file as YYYY-MM-DD, or None if it cannot be told.
 
-    Returns a short message: confirmation when every dated dump matches
-    `expected`, otherwise a warning naming the dates found, since the
-    numbers quoted in the narrative come from the `expected` dump.
+    Dated files carry the date in their name. Files named "latest" (as on
+    Jojie) take it from their folder when the folder is named YYYYMMDD.
     """
-    dates = sorted({
-        match.group(1) for path in dumps.values()
-        for match in [re.search(r"(\d{4}-\d{2}-\d{2}|latest)", path.name)]
-        if match
-    })
-    if dates == [expected]:
-        return f"All dumps are dated {expected}, as described in the text."
+    path = Path(path)
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
+    if match:
+        return match.group(1)
+    folder = path.parent.name
+    if re.fullmatch(r"\d{8}", folder):
+        return f"{folder[:4]}-{folder[4:6]}-{folder[6:]}"
+    return None
+
+
+def check_dump_date(dumps, expected=REPORT_DUMP_ALIASES):
+    """Compare the dumps' dates with the dump the report's text describes.
+
+    Returns a short message: confirmation when every dump matches one of
+    `expected` (the export date, or the Jojie folder date of the same
+    files), otherwise a warning naming the dates found.
+    """
+    dates = sorted({dump_date_of(path) or "unknown"
+                    for path in dumps.values()})
+    if dates and all(d in expected for d in dates):
+        return (f"Dumps dated {', '.join(dates)}: the {expected[0]} export "
+                "described in the text.")
     return (
         f"WARNING: dumps dated {', '.join(dates) or 'unknown'} were found, "
-        f"but the report's text quotes the {expected} dump. The tables and "
-        "charts will reflect the new data; update the numbers in the "
+        f"but the report's text quotes the {expected[0]} dump. The tables "
+        "and charts will reflect the new data; update the numbers in the "
         "narrative before submitting."
     )
 
@@ -817,6 +848,24 @@ def parse_ratings(spark, path):
     ).filter(F.col("work_key").isNotNull())
 
 
+def wikidata_output_schema():
+    """Columns of the cleaned Wikidata table, used for an empty table when
+    the Wikidata dump is not available."""
+    from pyspark.sql import types as T
+
+    return T.StructType([
+        T.StructField("qid", T.StringType()),
+        T.StructField("ol_author_ids", T.ArrayType(T.StringType())),
+        T.StructField("wd_birth_year", T.IntegerType()),
+        T.StructField("wd_death_year", T.IntegerType()),
+        T.StructField("wd_death_year_min", T.IntegerType()),
+        T.StructField("wd_philippine_citizen", T.BooleanType()),
+        T.StructField("json_ok", T.BooleanType()),
+    ])
+
+
+EMPTY_SCHEMAS = {"wikidata": wikidata_output_schema}
+
 PARSERS = {
     "works": parse_works,
     "editions": parse_editions,
@@ -853,11 +902,19 @@ def build_parquet_tables(spark, dumps, parquet_dir, overwrite=False,
         name for name in DUMP_NAMES
         if overwrite or not (out[name] / "_SUCCESS").is_file()
     ]
-    missing = [name for name in todo if name not in dumps]
+    missing = [name for name in todo
+               if name not in dumps and name not in OPTIONAL_DUMPS]
     if missing:
         raise FileNotFoundError(
             f"No Parquet table and no raw dump for: {missing}"
         )
+    # An optional dump that is absent (Wikidata on Jojie) is saved as an
+    # empty table with the usual columns, so every later join still works
+    # and simply finds no matches.
+    for name in [n for n in todo if n not in dumps]:
+        spark.createDataFrame([], EMPTY_SCHEMAS[name]()).write.mode(
+            "overwrite").parquet(str(out[name]))
+    todo = [name for name in todo if name in dumps]
 
     def write(name):
         table = PARSERS[name](spark, dumps[name])
@@ -1472,7 +1529,7 @@ def first_year_histogram(status, start=1800, end=MAX_VALID_YEAR):
 # ---------------------------------------------------------------------------
 
 
-def compute_demand(reading_log, ratings, trend_end=date(2026, 10, 31)):
+def compute_demand(reading_log, ratings, trend_end=DUMP_DATE):
     """Per-work demand signals.
 
     * want_to_read, currently_reading, already_read: shelf entries;
@@ -1537,7 +1594,7 @@ def summarize_shelves(reading_log, ratings):
 
 
 def monthly_want_to_read(reading_log, status, start="2015-01-01",
-                         end="2026-10-31"):
+                         end=DUMP_DATE.isoformat()):
     """Monthly Want-to-Read entries split by the work's rights group.
 
     Groups: "US PD (<=1930)", "Enters 2027", "Renewal unknown (1932-63)"
@@ -2173,7 +2230,8 @@ def demand_by_decade(profile, start=1800, end=2000):
     This is the bivariate view behind the whole project: if old works
     were simply unwanted, a public-domain opportunity would not exist.
     The default stops at the 2000s because a work first published from
-    2017 on counts as having a recent edition by definition, which would
+    RECENT_FROM_YEAR on counts as having a recent edition by definition,
+    which would
     make the supply column meaningless for the 2010s and 2020s.
 
     Returns
@@ -2256,7 +2314,9 @@ def demand_supply_correlation(profile, max_rows=200_000):
     return pd.DataFrame(rows)
 
 
-def demand_persistence(reading_log, cutoff=date(2025, 10, 31),
+def demand_persistence(reading_log, cutoff=date(DUMP_DATE.year - 1,
+                                                DUMP_DATE.month,
+                                                DUMP_DATE.day),
                        quantile=0.99, months=12):
     """Hold-out check: do works wanted before a cutoff stay wanted after?
 
@@ -2969,7 +3029,8 @@ def plot_supply_comparison(groups):
     data = groups.set_index("US status")[
         ["pct_with_recent_edition", "pct_digitized", "pct_filipino"]
     ].rename(columns={
-        "pct_with_recent_edition": "Has an edition from 2017 on",
+        "pct_with_recent_edition":
+            f"Has an edition from {RECENT_FROM_YEAR} on",
         "pct_digitized": "Has a digitized copy",
         "pct_filipino": "Has a Filipino-language edition",
     })
@@ -3144,7 +3205,8 @@ def plot_demand_by_decade(table):
     panels = [
         ("pct_shelved", "Works with any Want-to-Read (%)", GREEN),
         ("wtr_per_shelved_work", "Entries per shelved work", GREEN),
-        ("pct_recent_edition", "Works with an edition since 2017 (%)",
+        ("pct_recent_edition",
+         f"Works with an edition since {RECENT_FROM_YEAR} (%)",
          INK),
     ]
     for ax, (column, title, color) in zip(axes, panels):
